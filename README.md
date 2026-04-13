@@ -6,44 +6,67 @@ Official Go SDK for [AuthForge](https://authforge.cc) with HMAC-verified license
 
 ## Installation
 
-```bash
-go get github.com/AuthForgeCC/authforge-go
+The module is **not** published for remote install yet (for example there is no public `go get` from GitHub). Use a **local clone** or **vendored copy** of this repository.
+
+### Local module with `replace`
+
+1. Clone or copy this SDK somewhere on your machine (for example next to your application).
+2. In your application’s `go.mod`, require the SDK module path and add a `replace` directive to your local directory (the folder that contains this SDK’s `go.mod`):
+
+```go
+module example.com/myapp
+
+go 1.21
+
+require github.com/AuthForgeCC/authforge-go v0.0.0
+
+replace github.com/AuthForgeCC/authforge-go => ../path/to/authforge-go
 ```
 
+Adjust `../path/to/authforge-go` to the real path. Run `go mod tidy`.
+
+Imports in your code stay as `github.com/AuthForgeCC/authforge-go` (matching the `module` line in the SDK’s `go.mod`).
+
+### Copy source into your project
+
+Copy `authforge.go`, `hwid.go`, `crypto.go`, and `go.mod` into your tree (for example under `internal/authforge/`) and wire them as part of your module, adjusting import paths if you change the module path.
+
 ## Quick start
+
+The quick start below assumes you configured the module as in **Installation** (for example using `replace` to a local clone).
 
 ```go
 package main
 
 import (
-    "fmt"
-    "os"
+	"fmt"
+	"os"
 
-    "github.com/AuthForgeCC/authforge-go"
+	"github.com/AuthForgeCC/authforge-go"
 )
 
 func main() {
-    client, err := authforge.New(authforge.Config{
-        AppID:         "YOUR_APP_ID",
-        AppSecret:     "YOUR_APP_SECRET",
-        HeartbeatMode: "server",
-        OnFailure: func(errMsg string) {
-            fmt.Fprintf(os.Stderr, "Auth failed: %s\n", errMsg)
-            os.Exit(1)
-        },
-    })
-    if err != nil {
-        panic(err)
-    }
+	client, err := authforge.New(authforge.Config{
+		AppID:         "YOUR_APP_ID",
+		AppSecret:     "YOUR_APP_SECRET",
+		HeartbeatMode: "server",
+		OnFailure: func(errMsg string) {
+			fmt.Fprintf(os.Stderr, "Auth failed: %s\n", errMsg)
+			os.Exit(1)
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
 
-    result, err := client.Login("XXXX-XXXX-XXXX-XXXX")
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
-        os.Exit(1)
-    }
+	result, err := client.Login("XXXX-XXXX-XXXX-XXXX")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
+		os.Exit(1)
+	}
 
-    fmt.Printf("Authenticated! Expires: %d\n", result.ExpiresIn)
-    select {}
+	fmt.Printf("Authenticated! Expires: %d\n", result.ExpiresIn)
+	select {}
 }
 ```
 
@@ -81,40 +104,40 @@ The SDK returns errors instead of panicking. Common failure cases are exposed as
 
 ```go
 if err != nil {
-    switch {
-    case errors.Is(err, authforge.ErrInvalidApp):
-        // app credentials are invalid
-    case errors.Is(err, authforge.ErrInvalidKey):
-        // license key is invalid
-    case errors.Is(err, authforge.ErrExpired):
-        // license expired
-    case errors.Is(err, authforge.ErrRevoked):
-        // license revoked
-    case errors.Is(err, authforge.ErrHwidMismatch):
-        // HWID slots full
-    case errors.Is(err, authforge.ErrNoCredits):
-        // account has no credits
-    case errors.Is(err, authforge.ErrBlocked):
-        // blocked by security rules
-    case errors.Is(err, authforge.ErrRateLimited):
-        // request was rate limited
-    case errors.Is(err, authforge.ErrReplayDetected):
-        // nonce replay detected
-    case errors.Is(err, authforge.ErrAppDisabled):
-        // app disabled
-    case errors.Is(err, authforge.ErrSessionExpired):
-        // session expired
-    case errors.Is(err, authforge.ErrBadRequest):
-        // malformed request
-    case errors.Is(err, authforge.ErrChecksumRequired):
-        // checksum required by server
-    case errors.Is(err, authforge.ErrChecksumMismatch):
-        // checksum mismatch
-    case errors.Is(err, authforge.ErrSignatureMismatch):
-        // response signature mismatch
-    default:
-        // transport or unknown error
-    }
+	switch {
+	case errors.Is(err, authforge.ErrInvalidApp):
+		// app credentials are invalid
+	case errors.Is(err, authforge.ErrInvalidKey):
+		// license key is invalid
+	case errors.Is(err, authforge.ErrExpired):
+		// license expired
+	case errors.Is(err, authforge.ErrRevoked):
+		// license revoked
+	case errors.Is(err, authforge.ErrHwidMismatch):
+		// HWID slots full
+	case errors.Is(err, authforge.ErrNoCredits):
+		// account has no credits
+	case errors.Is(err, authforge.ErrBlocked):
+		// blocked by security rules
+	case errors.Is(err, authforge.ErrRateLimited):
+		// request was rate limited
+	case errors.Is(err, authforge.ErrReplayDetected):
+		// nonce replay detected
+	case errors.Is(err, authforge.ErrAppDisabled):
+		// app disabled
+	case errors.Is(err, authforge.ErrSessionExpired):
+		// session expired
+	case errors.Is(err, authforge.ErrBadRequest):
+		// malformed request
+	case errors.Is(err, authforge.ErrChecksumRequired):
+		// checksum required by server
+	case errors.Is(err, authforge.ErrChecksumMismatch):
+		// checksum mismatch
+	case errors.Is(err, authforge.ErrSignatureMismatch):
+		// response signature mismatch
+	default:
+		// transport or unknown error
+	}
 }
 ```
 

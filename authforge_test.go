@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -22,10 +21,10 @@ type vectorFile struct {
 	} `json:"outputs"`
 }
 
-func TestCryptoVectorsFromPythonSDK(t *testing.T) {
+func TestCryptoVectorsMatchReference(t *testing.T) {
 	t.Parallel()
 
-	vectorPath := filepath.Join("..", "AuthForge-PythonSDK", "test_vectors.json")
+	vectorPath := "test_vectors.json"
 	raw, err := os.ReadFile(vectorPath)
 	if err != nil {
 		t.Fatalf("read test vectors: %v", err)

@@ -9,7 +9,7 @@ AuthForge is a license key validation service. Your app sends a license key + ha
 
 ## Installation
 
-Add the module with `go get github.com/AuthForgeCC/authforge-go` (stdlib only), or copy the SDK `.go` files into your module.
+The module is not available via remote `go get` yet. Clone or copy this repository, then use a `replace` directive in your app’s `go.mod` pointing at the local SDK folder (see README), or vendor the `.go` files into your module.
 
 ## Minimal working integration
 
