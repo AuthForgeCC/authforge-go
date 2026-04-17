@@ -30,6 +30,7 @@ var (
 	ErrAppDisabled       = errors.New("authforge: app disabled")
 	ErrSessionExpired    = errors.New("authforge: session expired")
 	ErrBadRequest        = errors.New("authforge: bad request")
+	ErrServerError       = errors.New("authforge: server error")
 	ErrChecksumRequired  = errors.New("authforge: checksum required")
 	ErrChecksumMismatch  = errors.New("authforge: checksum mismatch")
 	ErrSignatureMismatch = errors.New("authforge: signature verification failed")
@@ -67,10 +68,12 @@ type Client struct {
 	mu               sync.Mutex
 	licenseKey       string
 	sessionToken     string
+	sigKey           string
 	sessionExpiresIn int64
 	lastNonce        string
 	rawPayloadB64    string
 	signature        string
+	derivedKey       []byte
 	sessionData      map[string]interface{}
 	appVariables     map[string]interface{}
 	licenseVariables map[string]interface{}
@@ -150,10 +153,12 @@ func (c *Client) Logout() {
 	c.heartbeatCtx = nil
 	c.licenseKey = ""
 	c.sessionToken = ""
+	c.sigKey = ""
 	c.sessionExpiresIn = 0
 	c.lastNonce = ""
 	c.rawPayloadB64 = ""
 	c.signature = ""
+	c.derivedKey = nil
 	c.sessionData = map[string]interface{}{}
 	c.appVariables = map[string]interface{}{}
 	c.licenseVariables = map[string]interface{}{}
@@ -225,7 +230,7 @@ func (c *Client) validateOnce(licenseKey string) (*LoginResult, error) {
 		return nil, err
 	}
 
-	return c.applySignedResponse(response, nonce, licenseKey, true)
+	return c.applySignedResponse(response, nonce, licenseKey, true, "validate")
 }
 
 func (c *Client) startHeartbeat() {
@@ -297,7 +302,7 @@ func (c *Client) serverHeartbeat() error {
 		return err
 	}
 
-	_, err = c.applySignedResponse(response, nonce, "", false)
+	_, err = c.applySignedResponse(response, nonce, "", false, "heartbeat")
 	return err
 }
 
@@ -306,14 +311,15 @@ func (c *Client) localHeartbeat() error {
 	payload := c.rawPayloadB64
 	signature := c.signature
 	nonce := c.lastNonce
+	derivedKey := c.derivedKey
 	expiresIn := c.sessionExpiresIn
 	c.mu.Unlock()
 
-	if payload == "" || signature == "" || nonce == "" {
+	if payload == "" || signature == "" || nonce == "" || len(derivedKey) == 0 {
 		return fmt.Errorf("authforge: missing local verification state")
 	}
 
-	if !verifySignature(payload, signature, c.appSecret, nonce) {
+	if !verifySignature(payload, signature, derivedKey) {
 		return ErrSignatureMismatch
 	}
 
@@ -328,6 +334,7 @@ func (c *Client) applySignedResponse(
 	expectedNonce string,
 	licenseKey string,
 	isLogin bool,
+	signingContext string,
 ) (*LoginResult, error) {
 	status := response["status"]
 	if !isSuccessStatus(status) {
@@ -358,13 +365,34 @@ func (c *Client) applySignedResponse(
 		return nil, fmt.Errorf("authforge: nonce mismatch")
 	}
 
-	if !verifySignature(payloadB64, signature, c.appSecret, expectedNonce) {
+	var derivedKey []byte
+	switch signingContext {
+	case "validate":
+		derivedKey = deriveValidateKey(c.appSecret, expectedNonce)
+	case "heartbeat":
+		c.mu.Lock()
+		sigKey := c.sigKey
+		c.mu.Unlock()
+		if sigKey == "" {
+			return nil, fmt.Errorf("authforge: missing sig key")
+		}
+		derivedKey = deriveHeartbeatKey(sigKey, expectedNonce)
+	default:
+		return nil, fmt.Errorf("authforge: unknown signing context %q", signingContext)
+	}
+
+	if !verifySignature(payloadB64, signature, derivedKey) {
 		return nil, ErrSignatureMismatch
 	}
 
 	sessionToken := valueAsString(payload["sessionToken"])
 	if sessionToken == "" {
 		return nil, fmt.Errorf("authforge: missing session token")
+	}
+
+	newSigKey, hasSigKey := extractSigKeyFromSessionToken(sessionToken)
+	if !hasSigKey {
+		return nil, fmt.Errorf("authforge: missing sigKey")
 	}
 
 	expiresIn, hasTokenExpiry := extractExpiresFromSessionToken(sessionToken)
@@ -385,10 +413,12 @@ func (c *Client) applySignedResponse(
 		c.licenseKey = licenseKey
 	}
 	c.sessionToken = sessionToken
+	c.sigKey = newSigKey
 	c.sessionExpiresIn = expiresIn
 	c.lastNonce = expectedNonce
 	c.rawPayloadB64 = payloadB64
 	c.signature = strings.ToLower(strings.TrimSpace(signature))
+	c.derivedKey = derivedKey
 	c.sessionData = cloneMap(payload)
 	if appVars != nil || isLogin {
 		c.appVariables = cloneMap(appVars)
@@ -471,14 +501,14 @@ func (c *Client) postJSON(path string, body map[string]interface{}) (map[string]
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(rawBody, &parsed); err != nil {
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				return nil, fmt.Errorf("authforge: http error %d: %s", response.StatusCode, strings.TrimSpace(string(rawBody)))
+				return nil, fmt.Errorf("authforge: http error %d", response.StatusCode)
 			}
 			return nil, fmt.Errorf("authforge: invalid json response: %w", err)
 		}
 
 		serverError := extractServerError(parsed)
-		if serverError == "rate_limited" {
-			lastRateErr = mapServerError(serverError)
+		if response.StatusCode == 429 || serverError == "rate_limited" {
+			lastRateErr = mapServerError("rate_limited")
 			continue
 		}
 
@@ -517,6 +547,8 @@ func mapServerError(serverError string) error {
 		return fmt.Errorf("%w: %s", ErrSessionExpired, serverError)
 	case "bad_request":
 		return fmt.Errorf("%w: %s", ErrBadRequest, serverError)
+	case "server_error":
+		return fmt.Errorf("%w: %s", ErrServerError, serverError)
 	case "checksum_required":
 		return fmt.Errorf("%w: %s", ErrChecksumRequired, serverError)
 	case "checksum_mismatch":
@@ -529,13 +561,13 @@ func mapServerError(serverError string) error {
 func extractServerError(response map[string]interface{}) string {
 	errorCode := strings.ToLower(valueAsString(response["error"]))
 	switch errorCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "bad_request", "checksum_required", "checksum_mismatch":
+	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "bad_request", "server_error", "checksum_required", "checksum_mismatch":
 		return errorCode
 	}
 
 	statusCode := strings.ToLower(valueAsString(response["status"]))
 	switch statusCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "bad_request", "checksum_required", "checksum_mismatch":
+	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "bad_request", "server_error", "checksum_required", "checksum_mismatch":
 		return statusCode
 	}
 	return ""

@@ -9,8 +9,13 @@ import (
 	"strings"
 )
 
-func deriveKey(appSecret, nonce string) []byte {
+func deriveValidateKey(appSecret, nonce string) []byte {
 	h := sha256.Sum256([]byte(appSecret + nonce))
+	return h[:]
+}
+
+func deriveHeartbeatKey(sigKey, nonce string) []byte {
+	h := sha256.Sum256([]byte(sigKey + nonce))
 	return h[:]
 }
 
@@ -20,8 +25,7 @@ func signPayload(payload string, key []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func verifySignature(payload, signature, appSecret, nonce string) bool {
-	key := deriveKey(appSecret, nonce)
+func verifySignature(payload, signature string, key []byte) bool {
 	expected := signPayload(payload, key)
 	return hmac.Equal([]byte(expected), []byte(strings.ToLower(strings.TrimSpace(signature))))
 }
@@ -39,29 +43,48 @@ func decodePayload(payloadB64 string) (map[string]interface{}, error) {
 	return payload, nil
 }
 
-func extractExpiresFromSessionToken(sessionToken string) (int64, bool) {
-	parts := strings.Split(sessionToken, ".")
+func decodeSessionTokenBody(sessionToken string) (map[string]interface{}, bool) {
+	parts := strings.SplitN(sessionToken, ".", 2)
 	if len(parts) < 2 {
-		return 0, false
+		return nil, false
 	}
 
 	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return 0, false
+		return nil, false
 	}
 
 	var body map[string]interface{}
 	if err := json.Unmarshal(decoded, &body); err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+func extractExpiresFromSessionToken(sessionToken string) (int64, bool) {
+	body, ok := decodeSessionTokenBody(sessionToken)
+	if !ok {
 		return 0, false
 	}
-
-	if expiresValue, ok := numberToInt64(body["expiresIn"]); ok {
-		return expiresValue, true
+	if value, ok := numberToInt64(body["expiresIn"]); ok {
+		return value, true
 	}
-	if expiresValue, ok := numberToInt64(body["exp"]); ok {
-		return expiresValue, true
+	if value, ok := numberToInt64(body["exp"]); ok {
+		return value, true
 	}
 	return 0, false
+}
+
+func extractSigKeyFromSessionToken(sessionToken string) (string, bool) {
+	body, ok := decodeSessionTokenBody(sessionToken)
+	if !ok {
+		return "", false
+	}
+	value, ok := body["sigKey"].(string)
+	if !ok || value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 func numberToInt64(value interface{}) (int64, bool) {
