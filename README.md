@@ -1,6 +1,6 @@
 # AuthForge Go SDK
 
-Official Go SDK for [AuthForge](https://authforge.cc) with HMAC-verified license validation and background heartbeats.
+Official Go SDK for [AuthForge](https://authforge.cc) with Ed25519-verified license validation and background heartbeats.
 
 **Zero external dependencies.** Uses only the Go standard library.
 
@@ -49,6 +49,7 @@ func main() {
 	client, err := authforge.New(authforge.Config{
 		AppID:         "YOUR_APP_ID",
 		AppSecret:     "YOUR_APP_SECRET",
+		PublicKey:     "YOUR_PUBLIC_KEY",
 		HeartbeatMode: "server",
 		OnFailure: func(errMsg string) {
 			fmt.Fprintf(os.Stderr, "Auth failed: %s\n", errMsg)
@@ -76,6 +77,7 @@ func main() {
 |---|---|---|---|
 | `AppID` | `string` | required | App ID from dashboard |
 | `AppSecret` | `string` | required | App secret from dashboard |
+| `PublicKey` | `string` | required | App Ed25519 public key (base64) from dashboard |
 | `HeartbeatMode` | `string` | required | `"server"` or `"local"` |
 | `HeartbeatInterval` | `time.Duration` | `15 * time.Minute` | Interval between heartbeat checks |
 | `APIBaseURL` | `string` | `https://auth.authforge.cc` | API base URL override |
@@ -129,10 +131,6 @@ if err != nil {
 		// session expired
 	case errors.Is(err, authforge.ErrBadRequest):
 		// malformed request
-	case errors.Is(err, authforge.ErrChecksumRequired):
-		// checksum required by server
-	case errors.Is(err, authforge.ErrChecksumMismatch):
-		// checksum mismatch
 	case errors.Is(err, authforge.ErrSignatureMismatch):
 		// response signature mismatch
 	default:

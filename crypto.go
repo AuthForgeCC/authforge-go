@@ -1,33 +1,18 @@
 package authforge
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"strings"
 )
 
-func deriveValidateKey(appSecret, nonce string) []byte {
-	h := sha256.Sum256([]byte(appSecret + nonce))
-	return h[:]
-}
-
-func deriveHeartbeatKey(sigKey, nonce string) []byte {
-	h := sha256.Sum256([]byte(sigKey + nonce))
-	return h[:]
-}
-
-func signPayload(payload string, key []byte) string {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(payload))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func verifySignature(payload, signature string, key []byte) bool {
-	expected := signPayload(payload, key)
-	return hmac.Equal([]byte(expected), []byte(strings.ToLower(strings.TrimSpace(signature))))
+func verifySignature(payload, signature string, publicKey []byte) bool {
+	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(publicKey), []byte(payload), signatureBytes)
 }
 
 func decodePayload(payloadB64 string) (map[string]interface{}, error) {
@@ -73,18 +58,6 @@ func extractExpiresFromSessionToken(sessionToken string) (int64, bool) {
 		return value, true
 	}
 	return 0, false
-}
-
-func extractSigKeyFromSessionToken(sessionToken string) (string, bool) {
-	body, ok := decodeSessionTokenBody(sessionToken)
-	if !ok {
-		return "", false
-	}
-	value, ok := body["sigKey"].(string)
-	if !ok || value == "" {
-		return "", false
-	}
-	return value, true
 }
 
 func numberToInt64(value interface{}) (int64, bool) {
