@@ -6,12 +6,18 @@ Official Go SDK for [AuthForge](https://authforge.cc) with Ed25519-verified lice
 
 ## Installation
 
-The module is **not** published for remote install yet (for example there is no public `go get` from GitHub). Use a **local clone** or **vendored copy** of this repository.
+The module is **`github.com/AuthForgeCC/authforge-go`**. With a released version tag on GitHub, add it like any other public module:
 
-### Local module with `replace`
+```bash
+go get github.com/AuthForgeCC/authforge-go@v1.0.1
+```
 
-1. Clone or copy this SDK somewhere on your machine (for example next to your application).
-2. In your application’s `go.mod`, require the SDK module path and add a `replace` directive to your local directory (the folder that contains this SDK’s `go.mod`):
+Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.0.1`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
+
+### Local module with `replace` (forks, air-gapped builds, or hacking on the SDK)
+
+1. Clone this repository somewhere on your machine (for example next to your application).
+2. In your application’s `go.mod`, require the module path and add a `replace` to your local checkout:
 
 ```go
 module example.com/myapp
@@ -23,17 +29,15 @@ require github.com/AuthForgeCC/authforge-go v0.0.0
 replace github.com/AuthForgeCC/authforge-go => ../path/to/authforge-go
 ```
 
-Adjust `../path/to/authforge-go` to the real path. Run `go mod tidy`.
-
-Imports in your code stay as `github.com/AuthForgeCC/authforge-go` (matching the `module` line in the SDK’s `go.mod`).
+Adjust `../path/to/authforge-go` to the real path, then run `go mod tidy`.
 
 ### Copy source into your project
 
-Copy `authforge.go`, `hwid.go`, `crypto.go`, and `go.mod` into your tree (for example under `internal/authforge/`) and wire them as part of your module, adjusting import paths if you change the module path.
+You can vendor `authforge.go`, `hwid.go`, `crypto.go`, and related files into your tree (for example under `internal/authforge/`) and adjust import paths if you change the module path. Prefer `go get` when possible.
 
 ## Quick start
 
-The quick start below assumes you configured the module as in **Installation** (for example using `replace` to a local clone).
+The quick start below assumes `go get` (or a `replace` pointing at a local clone) is configured as in **Installation**.
 
 ```go
 package main
