@@ -45,6 +45,11 @@ type Config struct {
 	APIBaseURL        string
 	OnFailure         func(error string)
 	RequestTimeout    time.Duration
+
+	// SessionTTL overrides the session token lifetime requested from the
+	// server on Login. Zero means "use the server default" (24h today).
+	// Server clamps to [1h, 7d]; out-of-range values are silently clamped.
+	SessionTTL time.Duration
 }
 
 type LoginResult struct {
@@ -63,6 +68,9 @@ type Client struct {
 	apiBaseURL        string
 	onFailure         func(error string)
 	httpClient        *http.Client
+	// sessionTTLSeconds is the SDK-requested session TTL sent to /auth/validate.
+	// Zero means "let the server pick its default".
+	sessionTTLSeconds int
 
 	hwid string
 
@@ -119,6 +127,14 @@ func New(cfg Config) (*Client, error) {
 		timeout = 15 * time.Second
 	}
 
+	sessionTTLSeconds := 0
+	if cfg.SessionTTL > 0 {
+		sessionTTLSeconds = int(cfg.SessionTTL / time.Second)
+		if sessionTTLSeconds < 1 {
+			sessionTTLSeconds = 1
+		}
+	}
+
 	client := &Client{
 		appID:             strings.TrimSpace(cfg.AppID),
 		appSecret:         strings.TrimSpace(cfg.AppSecret),
@@ -127,6 +143,7 @@ func New(cfg Config) (*Client, error) {
 		heartbeatInterval: interval,
 		apiBaseURL:        baseURL,
 		onFailure:         cfg.OnFailure,
+		sessionTTLSeconds: sessionTTLSeconds,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -229,6 +246,9 @@ func (c *Client) validateOnce(licenseKey string) (*LoginResult, error) {
 		"licenseKey": licenseKey,
 		"hwid":      c.hwid,
 		"nonce":     nonce,
+	}
+	if c.sessionTTLSeconds > 0 {
+		body["ttlSeconds"] = c.sessionTTLSeconds
 	}
 
 	response, err := c.postJSON("/auth/validate", body)

@@ -7,6 +7,13 @@
 
 AuthForge is a license key validation service. Your app sends a license key + hardware ID to the AuthForge API, gets back a cryptographically signed response, and runs background heartbeats to maintain the session. If the license is revoked or expired, the heartbeat fails and you handle it (typically exit the app).
 
+## Billing model (so you can pick sensible intervals)
+
+- **1 validation = 1 credit** (`Login` call).
+- **10 heartbeats = 1 credit** (billed on every 10th successful heartbeat, per license).
+- Any `HeartbeatInterval` is safe — from 1 second (server apps) to 15 minutes (desktop apps). The server bills per heartbeat, not per wall-clock time.
+- Revocation takes effect on the **very next heartbeat** regardless of interval.
+
 ## Installation
 
 The module is not available via remote `go get` yet. Clone or copy this repository, then use a `replace` directive in your app’s `go.mod` pointing at the local SDK folder (see README), or vendor the `.go` files into your module.
@@ -70,10 +77,11 @@ func main() {
 | `AppID` | `string` | yes | — | Application ID |
 | `AppSecret` | `string` | yes | — | Application secret |
 | `HeartbeatMode` | `string` | yes | — | `"server"` or `"local"` (case-insensitive) |
-| `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between heartbeats |
+| `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between heartbeats (any value from `1s` is supported) |
 | `APIBaseURL` | `string` | no | `https://auth.authforge.cc` | API base URL |
 | `OnFailure` | `func(error string)` | no | `nil` | Background heartbeat failures; login errors return from `Login` |
 | `RequestTimeout` | `time.Duration` | no | `15s` | Per-request HTTP timeout |
+| `SessionTTL` | `time.Duration` | no | `0` (server default: 24h) | Requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Heartbeats refresh the token while preserving this lifetime. |
 
 ## Methods
 
@@ -90,6 +98,9 @@ func main() {
 ## Error codes the server can return
 
 invalid_app, invalid_key, expired, revoked, hwid_mismatch, no_credits, blocked, rate_limited, replay_detected, session_expired, app_disabled, bad_request
+
+Notes:
+- `rate_limited` and `replay_detected` can only be returned from `/auth/validate`. Heartbeats are not IP rate-limited and do not enforce nonce replay.
 
 ## Common patterns
 

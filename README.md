@@ -79,10 +79,18 @@ func main() {
 | `AppSecret` | `string` | required | App secret from dashboard |
 | `PublicKey` | `string` | required | App Ed25519 public key (base64) from dashboard |
 | `HeartbeatMode` | `string` | required | `"server"` or `"local"` |
-| `HeartbeatInterval` | `time.Duration` | `15 * time.Minute` | Interval between heartbeat checks |
+| `HeartbeatInterval` | `time.Duration` | `15 * time.Minute` | Interval between heartbeat checks. Any interval from `1 * time.Second` up is supported; pick based on how fast you want revocations to propagate. |
 | `APIBaseURL` | `string` | `https://auth.authforge.cc` | API base URL override |
 | `OnFailure` | `func(error string)` | `nil` | Called when background heartbeat fails |
 | `RequestTimeout` | `time.Duration` | `15 * time.Second` | HTTP timeout per request |
+| `SessionTTL` | `time.Duration` | `0` (server default: 24h) | Requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Heartbeats refresh the session while preserving the requested TTL. |
+
+## Billing
+
+- **1 `Login` call = 1 credit** (one `/auth/validate` debit).
+- **10 heartbeats on the same license = 1 credit** (debited every 10th successful heartbeat).
+
+This means a session-style app running for 6 hours at a 15-minute interval burns ~1 validation + ~24 heartbeats = ~3.4 credits/day. A server app running 24/7 with a 1-minute interval burns ~145 credits/day per license — choose your interval based on how quickly you need revocations to take effect (they always land on the **next** heartbeat, regardless of interval).
 
 ## Methods
 
