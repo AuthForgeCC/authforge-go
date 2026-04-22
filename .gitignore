@@ -23,3 +23,7 @@ go.work.sum
 # IDE / OS
 .DS_Store
 Thumbs.db
+
+# Local secrets (integration tests / examples)
+.env
+.env.*
