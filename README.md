@@ -1,4 +1,4 @@
-# AuthForge Go SDK
+﻿# AuthForge Go SDK
 
 Official Go SDK for [AuthForge](https://authforge.cc) with Ed25519-verified license validation and background heartbeats.
 
@@ -9,15 +9,15 @@ Official Go SDK for [AuthForge](https://authforge.cc) with Ed25519-verified lice
 The module is **`github.com/AuthForgeCC/authforge-go`**. With a released version tag on GitHub, add it like any other public module:
 
 ```bash
-go get github.com/AuthForgeCC/authforge-go@v1.0.1
+go get github.com/AuthForgeCC/authforge-go@v1.0.2
 ```
 
-Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.0.1`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
+Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.0.2`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
 
 ### Local module with `replace` (forks, air-gapped builds, or hacking on the SDK)
 
 1. Clone this repository somewhere on your machine (for example next to your application).
-2. In your application’s `go.mod`, require the module path and add a `replace` to your local checkout:
+2. In your applicationâ€™s `go.mod`, require the module path and add a `replace` to your local checkout:
 
 ```go
 module example.com/myapp
@@ -107,7 +107,7 @@ client, err := authforge.New(authforge.Config{
 - **1 `Login` call = 1 credit** (one `/auth/validate` debit).
 - **10 heartbeats on the same license = 1 credit** (debited every 10th successful heartbeat).
 
-This means a session-style app running for 6 hours at a 15-minute interval burns ~1 validation + ~24 heartbeats = ~3.4 credits/day. A server app running 24/7 with a 1-minute interval burns ~145 credits/day per license — choose your interval based on how quickly you need revocations to take effect (they always land on the **next** heartbeat, regardless of interval).
+This means a session-style app running for 6 hours at a 15-minute interval burns ~1 validation + ~24 heartbeats = ~3.4 credits/day. A server app running 24/7 with a 1-minute interval burns ~145 credits/day per license â€” choose your interval based on how quickly you need revocations to take effect (they always land on the **next** heartbeat, regardless of interval).
 
 ## Methods
 

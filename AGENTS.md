@@ -1,4 +1,4 @@
-# AuthForge SDK — AI Agent Reference
+﻿# AuthForge SDK â€” AI Agent Reference
 
 > This file is optimized for AI coding agents (Cursor, Copilot, Claude Code, etc.).
 > It contains everything needed to correctly integrate AuthForge licensing into a project.
@@ -11,12 +11,12 @@ AuthForge is a license key validation service. Your app sends a license key + ha
 
 - **1 validation = 1 credit** (`Login` call).
 - **10 heartbeats = 1 credit** (billed on every 10th successful heartbeat, per license).
-- Any `HeartbeatInterval` is safe — from 1 second (server apps) to 15 minutes (desktop apps). The server bills per heartbeat, not per wall-clock time.
+- Any `HeartbeatInterval` is safe â€” from 1 second (server apps) to 15 minutes (desktop apps). The server bills per heartbeat, not per wall-clock time.
 - Revocation takes effect on the **very next heartbeat** regardless of interval.
 
 ## Installation
 
-Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.0.1`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
+Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.0.2`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
 
 ## Minimal working integration
 
@@ -74,9 +74,9 @@ func main() {
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `AppID` | `string` | yes | — | Application ID |
-| `AppSecret` | `string` | yes | — | Application secret |
-| `HeartbeatMode` | `string` | yes | — | `"server"` or `"local"` (case-insensitive) |
+| `AppID` | `string` | yes | â€” | Application ID |
+| `AppSecret` | `string` | yes | â€” | Application secret |
+| `HeartbeatMode` | `string` | yes | â€” | `"server"` or `"local"` (case-insensitive) |
 | `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between heartbeats (any value from `1s` is supported) |
 | `APIBaseURL` | `string` | no | `https://auth.authforge.cc` | API base URL |
 | `OnFailure` | `func(error string)` | no | `nil` | Background heartbeat failures; login errors return from `Login` |
@@ -92,7 +92,7 @@ For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<
 |--------|---------|-------------|
 | `New(Config)` | `(*Client, error)` | Validates config, constructs client |
 | `Login(licenseKey string)` | `(*LoginResult, error)` | Validates license and starts heartbeat |
-| `Logout()` | — | Stops heartbeat and clears state |
+| `Logout()` | â€” | Stops heartbeat and clears state |
 | `IsAuthenticated()` | `bool` | Whether authenticated |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Payload map |
 | `GetAppVariables()` / `AppVariables()` | `map[string]interface{}` | App variables |
@@ -128,7 +128,7 @@ Use `errors.Is` with `authforge.ErrInvalidKey`, `authforge.ErrExpired`, etc. on 
 
 ## Do NOT
 
-- Do not hardcode the app secret as a plain string literal in source — use environment variables or encrypted config
-- Do not skip `OnFailure` when you rely on heartbeats — it is invoked on heartbeat failure
-- Do not call `Login` on every app action — call once at startup; heartbeats handle the rest
+- Do not hardcode the app secret as a plain string literal in source â€” use environment variables or encrypted config
+- Do not skip `OnFailure` when you rely on heartbeats â€” it is invoked on heartbeat failure
+- Do not call `Login` on every app action â€” call once at startup; heartbeats handle the rest
 - Do not use `HeartbeatMode: "local"` unless the app has no internet after initial auth
