@@ -82,6 +82,9 @@ func main() {
 | `OnFailure` | `func(error string)` | no | `nil` | Background heartbeat failures; login errors return from `Login` |
 | `RequestTimeout` | `time.Duration` | no | `15s` | Per-request HTTP timeout |
 | `SessionTTL` | `time.Duration` | no | `0` (server default: 24h) | Requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Heartbeats refresh the token while preserving this lifetime. |
+| `HWIDOverride` | `string` | no | `""` | Optional custom HWID/subject string. When non-empty (for example `tg:123456789`), the SDK sends it instead of generating a machine fingerprint. |
+
+For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<user_id>`) instead of usernames.
 
 ## Methods
 

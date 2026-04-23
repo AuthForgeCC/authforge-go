@@ -31,6 +31,7 @@ var (
 	ErrReplayDetected    = errors.New("authforge: replay detected")
 	ErrAppDisabled       = errors.New("authforge: app disabled")
 	ErrSessionExpired    = errors.New("authforge: session expired")
+	ErrRevokeRequiresSession = errors.New("authforge: revoke requires session-authenticated self-ban")
 	ErrBadRequest        = errors.New("authforge: bad request")
 	ErrServerError       = errors.New("authforge: server error")
 	ErrSignatureMismatch = errors.New("authforge: signature verification failed")
@@ -45,6 +46,7 @@ type Config struct {
 	APIBaseURL        string
 	OnFailure         func(error string)
 	RequestTimeout    time.Duration
+	HWIDOverride      string
 
 	// SessionTTL overrides the session token lifetime requested from the
 	// server on Login. Zero means "use the server default" (24h today).
@@ -135,6 +137,11 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
+	resolvedHWID := strings.TrimSpace(cfg.HWIDOverride)
+	if resolvedHWID == "" {
+		resolvedHWID = generateHWID()
+	}
+
 	client := &Client{
 		appID:             strings.TrimSpace(cfg.AppID),
 		appSecret:         strings.TrimSpace(cfg.AppSecret),
@@ -147,9 +154,9 @@ func New(cfg Config) (*Client, error) {
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		hwid:            generateHWID(),
-		sessionData:     map[string]interface{}{},
-		appVariables:    map[string]interface{}{},
+		hwid:             resolvedHWID,
+		sessionData:      map[string]interface{}{},
+		appVariables:     map[string]interface{}{},
 		licenseVariables: map[string]interface{}{},
 	}
 
@@ -169,6 +176,74 @@ func (c *Client) Login(licenseKey string) (*LoginResult, error) {
 
 	c.startHeartbeat()
 	return result, nil
+}
+
+func (c *Client) SelfBan(
+	licenseKey string,
+	sessionToken string,
+	revokeLicense bool,
+	blacklistHwid bool,
+	blacklistIP bool,
+) (map[string]interface{}, error) {
+	c.mu.Lock()
+	currentSession := c.sessionToken
+	currentLicense := c.licenseKey
+	hwid := c.hwid
+	c.mu.Unlock()
+
+	resolvedSession := strings.TrimSpace(sessionToken)
+	if resolvedSession == "" {
+		resolvedSession = strings.TrimSpace(currentSession)
+	}
+	if resolvedSession != "" {
+		body := map[string]interface{}{
+			"appId":         c.appID,
+			"sessionToken":  resolvedSession,
+			"hwid":          hwid,
+			"revokeLicense": revokeLicense,
+			"blacklistHwid": blacklistHwid,
+			"blacklistIp":   blacklistIP,
+		}
+		response, err := c.postJSON("/auth/selfban", body)
+		if err != nil {
+			return nil, err
+		}
+		if !isSuccessStatus(response["status"]) {
+			return nil, mapServerError(valueAsString(response["error"]))
+		}
+		return response, nil
+	}
+
+	resolvedLicense := strings.TrimSpace(licenseKey)
+	if resolvedLicense == "" {
+		resolvedLicense = strings.TrimSpace(currentLicense)
+	}
+	if resolvedLicense == "" {
+		return nil, fmt.Errorf("authforge: missing license key")
+	}
+
+	nonce, err := generateNonce()
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]interface{}{
+		"appId":         c.appID,
+		"appSecret":     c.appSecret,
+		"licenseKey":    resolvedLicense,
+		"hwid":          hwid,
+		"nonce":         nonce,
+		"revokeLicense": false,
+		"blacklistHwid": blacklistHwid,
+		"blacklistIp":   blacklistIP,
+	}
+	response, err := c.postJSON("/auth/selfban", body)
+	if err != nil {
+		return nil, err
+	}
+	if !isSuccessStatus(response["status"]) {
+		return nil, mapServerError(valueAsString(response["error"]))
+	}
+	return response, nil
 }
 
 func (c *Client) Logout() {
@@ -241,11 +316,11 @@ func (c *Client) validateOnce(licenseKey string) (*LoginResult, error) {
 	}
 
 	body := map[string]interface{}{
-		"appId":     c.appID,
-		"appSecret": c.appSecret,
+		"appId":      c.appID,
+		"appSecret":  c.appSecret,
 		"licenseKey": licenseKey,
-		"hwid":      c.hwid,
-		"nonce":     nonce,
+		"hwid":       c.hwid,
+		"nonce":      nonce,
 	}
 	if c.sessionTTLSeconds > 0 {
 		body["ttlSeconds"] = c.sessionTTLSeconds
@@ -548,6 +623,8 @@ func mapServerError(serverError string) error {
 		return fmt.Errorf("%w: %s", ErrAppDisabled, serverError)
 	case "session_expired":
 		return fmt.Errorf("%w: %s", ErrSessionExpired, serverError)
+	case "revoke_requires_session":
+		return fmt.Errorf("%w: %s", ErrRevokeRequiresSession, serverError)
 	case "bad_request":
 		return fmt.Errorf("%w: %s", ErrBadRequest, serverError)
 	case "server_error", "system_error":
@@ -560,13 +637,13 @@ func mapServerError(serverError string) error {
 func extractServerError(response map[string]interface{}) string {
 	errorCode := strings.ToLower(valueAsString(response["error"]))
 	switch errorCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "bad_request", "server_error", "system_error":
+	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "server_error", "system_error":
 		return errorCode
 	}
 
 	statusCode := strings.ToLower(valueAsString(response["status"]))
 	switch statusCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "bad_request", "server_error", "system_error":
+	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "server_error", "system_error":
 		return statusCode
 	}
 	return ""

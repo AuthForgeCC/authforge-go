@@ -88,6 +88,19 @@ func main() {
 | `OnFailure` | `func(error string)` | `nil` | Called when background heartbeat fails |
 | `RequestTimeout` | `time.Duration` | `15 * time.Second` | HTTP timeout per request |
 | `SessionTTL` | `time.Duration` | `0` (server default: 24h) | Requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Heartbeats refresh the session while preserving the requested TTL. |
+| `HWIDOverride` | `string` | `""` | Optional custom hardware/subject identifier. When non-empty, the SDK sends this value instead of generated device fingerprint data. |
+
+### Identity-based binding example (Telegram/Discord)
+
+```go
+client, err := authforge.New(authforge.Config{
+    AppID:         "YOUR_APP_ID",
+    AppSecret:     "YOUR_APP_SECRET",
+    PublicKey:     "YOUR_PUBLIC_KEY",
+    HeartbeatMode: "server",
+    HWIDOverride:  fmt.Sprintf("tg:%d", telegramUserID), // or fmt.Sprintf("discord:%d", discordUserID)
+})
+```
 
 ## Billing
 
@@ -101,6 +114,7 @@ This means a session-style app running for 6 hours at a 15-minute interval burns
 | Method | Returns | Description |
 |---|---|---|
 | `Login(licenseKey string)` | `(*LoginResult, error)` | Validates key and stores signed session (`sessionToken`, `expiresIn`, `appVariables`, `licenseVariables`) |
+| `SelfBan(...)` | `(map[string]interface{}, error)` | Requests `/auth/selfban` to blacklist HWID/IP and optionally revoke (session-authenticated only) |
 | `Logout()` | `void` | Stops heartbeat and clears all session/auth state |
 | `IsAuthenticated()` | `bool` | True when an active authenticated session exists |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Full decoded payload map |
@@ -141,6 +155,8 @@ if err != nil {
 		// app disabled
 	case errors.Is(err, authforge.ErrSessionExpired):
 		// session expired
+	case errors.Is(err, authforge.ErrRevokeRequiresSession):
+		// attempted pre-session revoke
 	case errors.Is(err, authforge.ErrBadRequest):
 		// malformed request
 	case errors.Is(err, authforge.ErrSignatureMismatch):
@@ -155,6 +171,26 @@ Internal request retries are automatic:
 - `rate_limited`: retry after 2s, then 5s (max 3 attempts total)
 - network failure: retry once after 2s
 - retry attempts always use a fresh nonce
+
+## Self-ban (tamper response)
+
+Use `SelfBan(...)` when anti-tamper checks trigger:
+
+```go
+// Post-session (authenticated): defaults are typically all true in caller logic.
+_, err = client.SelfBan("", "", true, true, true)
+
+// Pre-session: pass license key, SDK automatically forces revokeLicense=false.
+_, err = client.SelfBan("AF-XXXX-XXXX-XXXX", "", true, true, true)
+
+// Explicit flags:
+_, err = client.SelfBan("", "", false, true, true)
+```
+
+`SelfBan(...)` selects mode automatically:
+- Uses post-session mode when a session token is available (`sessionToken` argument or current SDK session).
+- Falls back to pre-session mode with `licenseKey` + nonce + app secret.
+- In pre-session mode, revoke is always disabled client-side to avoid unsafe key revocations.
 
 ## License
 
