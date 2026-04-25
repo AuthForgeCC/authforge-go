@@ -9,7 +9,7 @@ AuthForge is a license key validation service. Your app sends a license key + ha
 
 ## Billing model (so you can pick sensible intervals)
 
-- **1 validation = 1 credit** (`Login` call).
+- **1 validation = 1 credit** (`Login` or `ValidateLicense` call).
 - **10 heartbeats = 1 credit** (billed on every 10th successful heartbeat, per license).
 - Any `HeartbeatInterval` is safe â€” from 1 second (server apps) to 15 minutes (desktop apps). The server bills per heartbeat, not per wall-clock time.
 - Revocation takes effect on the **very next heartbeat** regardless of interval.
@@ -79,7 +79,7 @@ func main() {
 | `HeartbeatMode` | `string` | yes | â€” | `"server"` or `"local"` (case-insensitive) |
 | `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between heartbeats (any value from `1s` is supported) |
 | `APIBaseURL` | `string` | no | `https://auth.authforge.cc` | API base URL |
-| `OnFailure` | `func(error string)` | no | `nil` | Background heartbeat failures; login errors return from `Login` |
+| `OnFailure` | `func(error string)` | no | `nil` | Heartbeat failures; `Login` network failures after retry. Not invoked by `ValidateLicense` |
 | `RequestTimeout` | `time.Duration` | no | `15s` | Per-request HTTP timeout |
 | `SessionTTL` | `time.Duration` | no | `0` (server default: 24h) | Requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Heartbeats refresh the token while preserving this lifetime. |
 | `HWIDOverride` | `string` | no | `""` | Optional custom HWID/subject string. When non-empty (for example `tg:123456789`), the SDK sends it instead of generating a machine fingerprint. |
@@ -92,6 +92,7 @@ For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<
 |--------|---------|-------------|
 | `New(Config)` | `(*Client, error)` | Validates config, constructs client |
 | `Login(licenseKey string)` | `(*LoginResult, error)` | Validates license and starts heartbeat |
+| `ValidateLicense(licenseKey string)` | `(*LoginResult, error)` | Same validate + signatures as `Login`; no session persistence or heartbeat; does not call `OnFailure` |
 | `Logout()` | â€” | Stops heartbeat and clears state |
 | `IsAuthenticated()` | `bool` | Whether authenticated |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Payload map |

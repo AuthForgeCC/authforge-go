@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +179,17 @@ func (c *Client) Login(licenseKey string) (*LoginResult, error) {
 	return result, nil
 }
 
+// ValidateLicense performs the same /auth/validate request and signature checks as Login,
+// without updating client session state or starting the heartbeat goroutine.
+func (c *Client) ValidateLicense(licenseKey string) (*LoginResult, error) {
+	trimmedLicense := strings.TrimSpace(licenseKey)
+	if trimmedLicense == "" {
+		return nil, fmt.Errorf("authforge: license key is required")
+	}
+
+	return c.validateOnce(trimmedLicense, false, false)
+}
+
 func (c *Client) SelfBan(
 	licenseKey string,
 	sessionToken string,
@@ -204,7 +216,7 @@ func (c *Client) SelfBan(
 			"blacklistHwid": blacklistHwid,
 			"blacklistIp":   blacklistIP,
 		}
-		response, err := c.postJSON("/auth/selfban", body)
+		response, err := c.postJSON("/auth/selfban", body, true)
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +248,7 @@ func (c *Client) SelfBan(
 		"blacklistHwid": blacklistHwid,
 		"blacklistIp":   blacklistIP,
 	}
-	response, err := c.postJSON("/auth/selfban", body)
+	response, err := c.postJSON("/auth/selfban", body, true)
 	if err != nil {
 		return nil, err
 	}
@@ -306,10 +318,10 @@ func (c *Client) GetLicenseVariables() map[string]interface{} {
 }
 
 func (c *Client) validateWithRateLimitRetry(licenseKey string) (*LoginResult, error) {
-	return c.validateOnce(licenseKey)
+	return c.validateOnce(licenseKey, true, true)
 }
 
-func (c *Client) validateOnce(licenseKey string) (*LoginResult, error) {
+func (c *Client) validateOnce(licenseKey string, persistSession bool, invokeOnNetworkFailure bool) (*LoginResult, error) {
 	nonce, err := generateNonce()
 	if err != nil {
 		return nil, err
@@ -326,12 +338,12 @@ func (c *Client) validateOnce(licenseKey string) (*LoginResult, error) {
 		body["ttlSeconds"] = c.sessionTTLSeconds
 	}
 
-	response, err := c.postJSON("/auth/validate", body)
+	response, err := c.postJSON("/auth/validate", body, invokeOnNetworkFailure)
 	if err != nil {
 		return nil, err
 	}
 
-	return c.applySignedResponse(response, nonce, licenseKey, true, "validate")
+	return c.applySignedResponse(response, nonce, licenseKey, persistSession, true, "validate")
 }
 
 func (c *Client) startHeartbeat() {
@@ -398,12 +410,12 @@ func (c *Client) serverHeartbeat() error {
 		"hwid":         c.hwid,
 	}
 
-	response, err := c.postJSON("/auth/heartbeat", body)
+	response, err := c.postJSON("/auth/heartbeat", body, true)
 	if err != nil {
 		return err
 	}
 
-	_, err = c.applySignedResponse(response, nonce, "", false, "heartbeat")
+	_, err = c.applySignedResponse(response, nonce, "", true, false, "heartbeat")
 	return err
 }
 
@@ -432,9 +444,11 @@ func (c *Client) applySignedResponse(
 	response map[string]interface{},
 	expectedNonce string,
 	licenseKey string,
+	persistSession bool,
 	isLogin bool,
 	signingContext string,
 ) (*LoginResult, error) {
+	_ = signingContext
 	status := response["status"]
 	if !isSuccessStatus(status) {
 		serverError := valueAsString(response["error"])
@@ -486,6 +500,16 @@ func (c *Client) applySignedResponse(
 	licenseVars := extractVariables(payload["licenseVariables"])
 	requestID := valueAsString(payload["requestId"])
 
+	if !persistSession {
+		return &LoginResult{
+			SessionToken:     sessionToken,
+			ExpiresIn:        expiresIn,
+			AppVariables:     cloneMap(appVars),
+			LicenseVariables: cloneMap(licenseVars),
+			RequestID:        requestID,
+		}, nil
+	}
+
 	c.mu.Lock()
 	if licenseKey != "" {
 		c.licenseKey = licenseKey
@@ -516,7 +540,7 @@ func (c *Client) applySignedResponse(
 	}, nil
 }
 
-func (c *Client) postJSON(path string, body map[string]interface{}) (map[string]interface{}, error) {
+func (c *Client) postJSON(path string, body map[string]interface{}, invokeOnNetworkFailure bool) (map[string]interface{}, error) {
 	rateRetryDelays := []time.Duration{0, 2 * time.Second, 5 * time.Second}
 	mutableBody := cloneMap(body)
 	var lastRateErr error
@@ -562,7 +586,7 @@ func (c *Client) postJSON(path string, body map[string]interface{}) (map[string]
 				request.Header.Set("Content-Type", "application/json")
 				continue
 			}
-			if c.onFailure != nil {
+			if invokeOnNetworkFailure && c.onFailure != nil {
 				c.onFailure("network_error")
 			}
 			return nil, fmt.Errorf("authforge: request failed: %w", err)
@@ -697,6 +721,9 @@ func cloneMap(value map[string]interface{}) map[string]interface{} {
 }
 
 func generateNonce() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("AUTHFORGE_SDK_TEST_NONCE")); v != "" {
+		return v, nil
+	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("authforge: nonce generation failed: %w", err)

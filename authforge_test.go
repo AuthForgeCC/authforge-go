@@ -3,7 +3,10 @@ package authforge
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +62,96 @@ func TestConfigRequiresPublicKey(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected missing public key validation error")
+	}
+}
+
+func TestValidateLicenseSuccessDoesNotStartHeartbeat(t *testing.T) {
+	t.Setenv("AUTHFORGE_SDK_TEST_NONCE", "nonce-validate-001")
+	vectors := loadVectors(t)
+	var successCase vectorCase
+	for _, c := range vectors.Cases {
+		if c.ID == "validate_success" {
+			successCase = c
+			break
+		}
+	}
+	if successCase.ID == "" {
+		t.Fatal("missing validate_success vector")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/auth/validate") {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "ok",
+			"payload":   successCase.Payload,
+			"signature": successCase.Signature,
+			"keyId":     "signing-key-1",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKey:     vectors.PublicKey,
+		HeartbeatMode: "local",
+		APIBaseURL:    srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := client.ValidateLicense("license-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SessionToken != "session.validate.token" {
+		t.Fatalf("token %q", res.SessionToken)
+	}
+	client.mu.Lock()
+	cancel := client.heartbeatCancel
+	auth := client.authenticated
+	client.mu.Unlock()
+	if cancel != nil {
+		t.Fatal("heartbeat should not start for ValidateLicense")
+	}
+	if auth {
+		t.Fatal("ValidateLicense should not persist session")
+	}
+}
+
+func TestValidateLicenseInvalidKeyNoHeartbeat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "invalid_key",
+			"error":  "invalid_key",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKey:     "0wRcYWn44wk9tHOisXgso1wbtUqpFdy0IeMk4HXDiNc=",
+		HeartbeatMode: "local",
+		APIBaseURL:    srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.ValidateLicense("bad")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	client.mu.Lock()
+	cancel := client.heartbeatCancel
+	client.mu.Unlock()
+	if cancel != nil {
+		t.Fatal("heartbeat should not start")
 	}
 }

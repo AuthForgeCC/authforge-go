@@ -104,7 +104,7 @@ client, err := authforge.New(authforge.Config{
 
 ## Billing
 
-- **1 `Login` call = 1 credit** (one `/auth/validate` debit).
+- **1 `Login` or `ValidateLicense` call = 1 credit** (one `/auth/validate` debit each).
 - **10 heartbeats on the same license = 1 credit** (debited every 10th successful heartbeat).
 
 This means a session-style app running for 6 hours at a 15-minute interval burns ~1 validation + ~24 heartbeats = ~3.4 credits/day. A server app running 24/7 with a 1-minute interval burns ~145 credits/day per license â€” choose your interval based on how quickly you need revocations to take effect (they always land on the **next** heartbeat, regardless of interval).
@@ -114,6 +114,7 @@ This means a session-style app running for 6 hours at a 15-minute interval burns
 | Method | Returns | Description |
 |---|---|---|
 | `Login(licenseKey string)` | `(*LoginResult, error)` | Validates key and stores signed session (`sessionToken`, `expiresIn`, `appVariables`, `licenseVariables`) |
+| `ValidateLicense(licenseKey string)` | `(*LoginResult, error)` | Same `/auth/validate` + signatures as `Login`; does not persist session or start heartbeats; does not invoke `OnFailure` for validate or network errors |
 | `SelfBan(...)` | `(map[string]interface{}, error)` | Requests `/auth/selfban` to blacklist HWID/IP and optionally revoke (session-authenticated only) |
 | `Logout()` | `void` | Stops heartbeat and clears all session/auth state |
 | `IsAuthenticated()` | `bool` | True when an active authenticated session exists |
@@ -166,6 +167,8 @@ if err != nil {
 	}
 }
 ```
+
+`ValidateLicense` returns the same error types as `Login` but **does not** call `OnFailure` for failed validate or network errors (heartbeats still use `OnFailure` on failure).
 
 Internal request retries are automatic:
 - `rate_limited`: retry after 2s, then 5s (max 3 attempts total)
