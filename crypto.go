@@ -7,12 +7,21 @@ import (
 	"strings"
 )
 
-func verifySignature(payload, signature string, publicKey []byte) bool {
+// verifySignature returns true if the signature validates against any key
+// in the trust list. Accepting multiple keys lets the SDK keep working
+// across a server-side rotation: clients pinned to the previous key still
+// trust newly-rotated key material once it's added to the configured set.
+func verifySignature(payload, signature string, publicKeys [][]byte) bool {
 	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
 		return false
 	}
-	return ed25519.Verify(ed25519.PublicKey(publicKey), []byte(payload), signatureBytes)
+	for _, key := range publicKeys {
+		if ed25519.Verify(ed25519.PublicKey(key), []byte(payload), signatureBytes) {
+			return true
+		}
+	}
+	return false
 }
 
 func decodePayload(payloadB64 string) (map[string]interface{}, error) {

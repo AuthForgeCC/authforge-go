@@ -39,9 +39,18 @@ var (
 )
 
 type Config struct {
-	AppID             string
-	AppSecret         string
-	PublicKey         string
+	AppID     string
+	AppSecret string
+	// PublicKey is the trusted Ed25519 public key (base64-encoded). For the
+	// common single-key case set this directly; during a server-side rotation
+	// pass the previous and current keys via PublicKeys instead so the SDK
+	// trusts both for the duration of the cutover.
+	PublicKey string
+	// PublicKeys is the optional rotation set; when non-empty it takes
+	// precedence over PublicKey. The first entry is treated as the primary
+	// (current) key for telemetry/logging purposes; verification accepts a
+	// signature that matches any entry.
+	PublicKeys        []string
 	HeartbeatMode     string
 	HeartbeatInterval time.Duration
 	APIBaseURL        string
@@ -80,7 +89,7 @@ type Client struct {
 	mu               sync.Mutex
 	licenseKey       string
 	sessionToken     string
-	publicKey        []byte
+	publicKeys       [][]byte
 	sessionExpiresIn int64
 	lastNonce        string
 	rawPayloadB64    string
@@ -95,6 +104,38 @@ type Client struct {
 	heartbeatWg     sync.WaitGroup
 }
 
+// collectPublicKeyStrings returns the canonical (de-duplicated, trimmed)
+// list of base64 public keys configured on cfg. Both PublicKeys and
+// PublicKey are honoured to keep callers that pre-date the rotation API
+// working unchanged. Callers may also pass a comma-separated string in
+// PublicKey for environment-variable convenience.
+func collectPublicKeyStrings(cfg Config) []string {
+	out := make([]string, 0, len(cfg.PublicKeys)+1)
+	seen := make(map[string]struct{})
+	add := func(value string) {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return
+		}
+		if _, exists := seen[trimmed]; exists {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	for _, key := range cfg.PublicKeys {
+		add(key)
+	}
+	if strings.Contains(cfg.PublicKey, ",") {
+		for _, segment := range strings.Split(cfg.PublicKey, ",") {
+			add(segment)
+		}
+	} else {
+		add(cfg.PublicKey)
+	}
+	return out
+}
+
 func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.AppID) == "" {
 		return nil, fmt.Errorf("authforge: app id is required")
@@ -102,12 +143,17 @@ func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.AppSecret) == "" {
 		return nil, fmt.Errorf("authforge: app secret is required")
 	}
-	if strings.TrimSpace(cfg.PublicKey) == "" {
+	publicKeyStrings := collectPublicKeyStrings(cfg)
+	if len(publicKeyStrings) == 0 {
 		return nil, fmt.Errorf("authforge: public key is required")
 	}
-	publicKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cfg.PublicKey))
-	if err != nil || len(publicKey) != 32 {
-		return nil, fmt.Errorf("authforge: invalid public key")
+	publicKeys := make([][]byte, 0, len(publicKeyStrings))
+	for _, raw := range publicKeyStrings {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil || len(decoded) != 32 {
+			return nil, fmt.Errorf("authforge: invalid public key")
+		}
+		publicKeys = append(publicKeys, decoded)
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(cfg.HeartbeatMode))
@@ -146,7 +192,7 @@ func New(cfg Config) (*Client, error) {
 	client := &Client{
 		appID:             strings.TrimSpace(cfg.AppID),
 		appSecret:         strings.TrimSpace(cfg.AppSecret),
-		publicKey:         publicKey,
+		publicKeys:        publicKeys,
 		heartbeatMode:     mode,
 		heartbeatInterval: interval,
 		apiBaseURL:        baseURL,
@@ -430,7 +476,7 @@ func (c *Client) localHeartbeat() error {
 		return fmt.Errorf("authforge: missing local verification state")
 	}
 
-	if !verifySignature(payload, signature, c.publicKey) {
+	if !verifySignature(payload, signature, c.publicKeys) {
 		return ErrSignatureMismatch
 	}
 
@@ -478,7 +524,7 @@ func (c *Client) applySignedResponse(
 		return nil, fmt.Errorf("authforge: nonce mismatch")
 	}
 
-	if !verifySignature(payloadB64, signature, c.publicKey) {
+	if !verifySignature(payloadB64, signature, c.publicKeys) {
 		return nil, ErrSignatureMismatch
 	}
 

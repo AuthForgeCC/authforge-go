@@ -47,10 +47,64 @@ func TestEd25519Vectors(t *testing.T) {
 		t.Fatalf("decode public key: %v", err)
 	}
 	for _, testCase := range vectors.Cases {
-		valid := verifySignature(testCase.Payload, testCase.Signature, publicKey)
+		valid := verifySignature(testCase.Payload, testCase.Signature, [][]byte{publicKey})
 		if valid != testCase.ShouldVerify {
 			t.Fatalf("vector %s validity mismatch: got %v want %v", testCase.ID, valid, testCase.ShouldVerify)
 		}
+	}
+}
+
+// During a server-side rotation a client may be configured with the
+// previous and the current public key. Verification has to walk every
+// entry instead of bailing on the first miss.
+func TestEd25519MultiKeyAcceptsAny(t *testing.T) {
+	vectors := loadVectors(t)
+	realKey, err := decodeBase64PublicKey(vectors.PublicKey)
+	if err != nil {
+		t.Fatalf("decode public key: %v", err)
+	}
+	decoy := make([]byte, 32)
+	for _, c := range vectors.Cases {
+		if !c.ShouldVerify {
+			continue
+		}
+		if !verifySignature(c.Payload, c.Signature, [][]byte{decoy, realKey}) {
+			t.Fatalf("multi-key verify rejected vector %s", c.ID)
+		}
+	}
+}
+
+func TestConfigAcceptsCommaSeparatedPublicKey(t *testing.T) {
+	vectors := loadVectors(t)
+	const decoy = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	client, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKey:     decoy + "," + vectors.PublicKey,
+		HeartbeatMode: "local",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.publicKeys) != 2 {
+		t.Fatalf("expected 2 trusted keys, got %d", len(client.publicKeys))
+	}
+}
+
+func TestConfigPublicKeysFieldRotationSet(t *testing.T) {
+	vectors := loadVectors(t)
+	const decoy = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	client, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKeys:    []string{decoy, vectors.PublicKey},
+		HeartbeatMode: "local",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.publicKeys) != 2 {
+		t.Fatalf("expected 2 trusted keys, got %d", len(client.publicKeys))
 	}
 }
 
