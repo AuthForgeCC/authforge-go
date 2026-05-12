@@ -20,22 +20,22 @@ import (
 const defaultAPIBaseURL = "https://auth.authforge.cc"
 
 var (
-	ErrInvalidApp        = errors.New("authforge: invalid app credentials")
-	ErrInvalidKey        = errors.New("authforge: invalid license key")
-	ErrExpired           = errors.New("authforge: license expired")
-	ErrRevoked           = errors.New("authforge: license revoked")
-	ErrHwidMismatch      = errors.New("authforge: HWID slots full")
-	ErrNoCredits         = errors.New("authforge: no credits")
-	ErrAppBurnCapReached = errors.New("authforge: app credit burn cap reached")
-	ErrBlocked           = errors.New("authforge: blocked")
-	ErrRateLimited       = errors.New("authforge: rate limited")
-	ErrReplayDetected    = errors.New("authforge: replay detected")
-	ErrAppDisabled       = errors.New("authforge: app disabled")
-	ErrSessionExpired    = errors.New("authforge: session expired")
+	ErrInvalidApp            = errors.New("authforge: invalid app credentials")
+	ErrInvalidKey            = errors.New("authforge: invalid license key")
+	ErrExpired               = errors.New("authforge: license expired")
+	ErrRevoked               = errors.New("authforge: license revoked")
+	ErrHwidMismatch          = errors.New("authforge: HWID slots full")
+	ErrNoCredits             = errors.New("authforge: no credits")
+	ErrAppBurnCapReached     = errors.New("authforge: app credit burn cap reached")
+	ErrBlocked               = errors.New("authforge: blocked")
+	ErrRateLimited           = errors.New("authforge: rate limited")
+	ErrReplayDetected        = errors.New("authforge: replay detected")
+	ErrAppDisabled           = errors.New("authforge: app disabled")
+	ErrSessionExpired        = errors.New("authforge: session expired")
 	ErrRevokeRequiresSession = errors.New("authforge: revoke requires session-authenticated self-ban")
-	ErrBadRequest        = errors.New("authforge: bad request")
-	ErrServerError       = errors.New("authforge: server error")
-	ErrSignatureMismatch = errors.New("authforge: signature verification failed")
+	ErrBadRequest            = errors.New("authforge: bad request")
+	ErrServerError           = errors.New("authforge: server error")
+	ErrSignatureMismatch     = errors.New("authforge: signature verification failed")
 )
 
 type Config struct {
@@ -67,9 +67,14 @@ type Config struct {
 type LoginResult struct {
 	SessionToken     string                 `json:"sessionToken"`
 	ExpiresIn        int64                  `json:"expiresIn"`
+	SessionExpiresAt string                 `json:"sessionExpiresAt,omitempty"`
+	LicenseExpiresAt *string                `json:"licenseExpiresAt,omitempty"`
+	MaxHwidSlots     *int                   `json:"maxHwidSlots,omitempty"`
+	HwidCount        *int                   `json:"hwidCount,omitempty"`
+	LicenseLabel     *string                `json:"licenseLabel,omitempty"`
 	AppVariables     map[string]interface{} `json:"appVariables,omitempty"`
 	LicenseVariables map[string]interface{} `json:"licenseVariables,omitempty"`
-	RequestID        string                 `json:"requestId"`
+	RequestID        string                 `json:"requestId,omitempty"`
 }
 
 type Client struct {
@@ -545,11 +550,30 @@ func (c *Client) applySignedResponse(
 	appVars := extractVariables(payload["appVariables"])
 	licenseVars := extractVariables(payload["licenseVariables"])
 	requestID := valueAsString(payload["requestId"])
+	sessionExpiresAt := valueAsString(payload["sessionExpiresAt"])
+	var licenseExpiresAt *string
+	if raw, has := payload["licenseExpiresAt"]; has {
+		switch typed := raw.(type) {
+		case nil:
+			empty := ""
+			licenseExpiresAt = &empty
+		case string:
+			licenseExpiresAt = &typed
+		}
+	}
+	maxHwidSlots := extractIntPtr(payload["maxHwidSlots"])
+	hwidCount := extractIntPtr(payload["hwidCount"])
+	licenseLabel := extractStringPtr(payload["licenseLabel"])
 
 	if !persistSession {
 		return &LoginResult{
 			SessionToken:     sessionToken,
 			ExpiresIn:        expiresIn,
+			SessionExpiresAt: sessionExpiresAt,
+			LicenseExpiresAt: licenseExpiresAt,
+			MaxHwidSlots:     maxHwidSlots,
+			HwidCount:        hwidCount,
+			LicenseLabel:     licenseLabel,
 			AppVariables:     cloneMap(appVars),
 			LicenseVariables: cloneMap(licenseVars),
 			RequestID:        requestID,
@@ -580,6 +604,11 @@ func (c *Client) applySignedResponse(
 	return &LoginResult{
 		SessionToken:     sessionToken,
 		ExpiresIn:        expiresIn,
+		SessionExpiresAt: sessionExpiresAt,
+		LicenseExpiresAt: licenseExpiresAt,
+		MaxHwidSlots:     maxHwidSlots,
+		HwidCount:        hwidCount,
+		LicenseLabel:     licenseLabel,
 		AppVariables:     appVarsCopy,
 		LicenseVariables: licenseVarsCopy,
 		RequestID:        requestID,

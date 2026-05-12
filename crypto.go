@@ -91,3 +91,25 @@ func numberToInt64(value interface{}) (int64, bool) {
 		return 0, false
 	}
 }
+
+func extractStringPtr(value interface{}) *string {
+	if value == nil {
+		return nil
+	}
+	s, ok := value.(string)
+	if !ok {
+		return nil
+	}
+	return &s
+}
+
+func extractIntPtr(value interface{}) *int {
+	if value == nil {
+		return nil
+	}
+	if v, ok := numberToInt64(value); ok {
+		i := int(v)
+		return &i
+	}
+	return nil
+}
