@@ -169,6 +169,8 @@ func New(cfg Config) (*Client, error) {
 	interval := cfg.HeartbeatInterval
 	if interval <= 0 {
 		interval = 15 * time.Minute
+	} else if interval < 10*time.Second {
+		return nil, fmt.Errorf("authforge: heartbeat interval must be >= 10s")
 	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.APIBaseURL), "/")
@@ -726,6 +728,8 @@ func mapServerError(serverError string) error {
 		return fmt.Errorf("%w: %s", ErrRevokeRequiresSession, serverError)
 	case "bad_request":
 		return fmt.Errorf("%w: %s", ErrBadRequest, serverError)
+	case "malformed_request":
+		return fmt.Errorf("%w: %s", ErrBadRequest, serverError)
 	case "server_error", "system_error":
 		return fmt.Errorf("%w: %s", ErrServerError, serverError)
 	default:
@@ -736,13 +740,13 @@ func mapServerError(serverError string) error {
 func extractServerError(response map[string]interface{}) string {
 	errorCode := strings.ToLower(valueAsString(response["error"]))
 	switch errorCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "server_error", "system_error":
+	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "malformed_request", "server_error", "system_error":
 		return errorCode
 	}
 
 	statusCode := strings.ToLower(valueAsString(response["status"]))
 	switch statusCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "server_error", "system_error":
+	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "malformed_request", "server_error", "system_error":
 		return statusCode
 	}
 	return ""

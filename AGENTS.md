@@ -11,7 +11,7 @@ AuthForge is a license key validation service. Your app sends a license key + ha
 
 - **1 validation = 1 credit** (`Login` or `ValidateLicense` call).
 - **10 heartbeats = 1 credit** (billed on every 10th successful heartbeat, per license).
-- Any `HeartbeatInterval` is safe â€” from 1 second (server apps) to 15 minutes (desktop apps). The server bills per heartbeat, not per wall-clock time.
+- Keep `HeartbeatInterval` at `>= 10s` (`15m` is the common desktop default). `/auth/heartbeat` is limited to 6 requests/minute per license key; billing still scales with heartbeat count.
 - Revocation takes effect on the **very next heartbeat** regardless of interval.
 
 ## Installation
@@ -77,7 +77,7 @@ func main() {
 | `AppID` | `string` | yes | â€” | Application ID |
 | `AppSecret` | `string` | yes | â€” | Application secret |
 | `HeartbeatMode` | `string` | yes | â€” | `"server"` or `"local"` (case-insensitive) |
-| `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between heartbeats (any value from `1s` is supported) |
+| `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between heartbeats (minimum `10s`) |
 | `APIBaseURL` | `string` | no | `https://auth.authforge.cc` | API base URL |
 | `OnFailure` | `func(error string)` | no | `nil` | Heartbeat failures; `Login` network failures after retry. Not invoked by `ValidateLicense` |
 | `RequestTimeout` | `time.Duration` | no | `15s` | Per-request HTTP timeout |
@@ -104,7 +104,7 @@ For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<
 invalid_app, invalid_key, expired, revoked, hwid_mismatch, no_credits, blocked, rate_limited, replay_detected, session_expired, app_disabled, bad_request
 
 Notes:
-- `rate_limited` and `replay_detected` can only be returned from `/auth/validate`. Heartbeats are not IP rate-limited and do not enforce nonce replay.
+- `replay_detected` is validate-only. `rate_limited` can be returned by `/auth/validate` and `/auth/heartbeat` (heartbeat is license-limited at 6/min and has no app-layer IP limit).
 
 ## Common patterns
 
