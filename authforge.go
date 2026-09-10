@@ -50,7 +50,18 @@ type Config struct {
 	// precedence over PublicKey. The first entry is treated as the primary
 	// (current) key for telemetry/logging purposes; verification accepts a
 	// signature that matches any entry.
-	PublicKeys        []string
+	PublicKeys []string
+
+	// OnlineHeartbeat enables the optional online check-ins policy: the SDK
+	// periodically calls POST /auth/heartbeat so revocation and
+	// concurrent-use detection take effect quickly. When false (the
+	// default), the SDK relies on the grace period instead: after a
+	// successful activation the app keeps running on the signed session,
+	// re-verified locally, until the session TTL expires, with no further
+	// network calls.
+	OnlineHeartbeat bool
+
+	// Deprecated: HeartbeatMode is deprecated. Leave it empty for the default grace period behavior, or set OnlineHeartbeat to true for online check-ins ("server" maps to OnlineHeartbeat, "local" maps to the default).
 	HeartbeatMode     string
 	HeartbeatInterval time.Duration
 	APIBaseURL        string
@@ -58,9 +69,11 @@ type Config struct {
 	RequestTimeout    time.Duration
 	HWIDOverride      string
 
-	// SessionTTL overrides the session token lifetime requested from the
-	// server on Login. Zero means "use the server default" (24h today).
-	// Server clamps to [1h, 7d]; out-of-range values are silently clamped.
+	// SessionTTL sets the grace period duration: how long the app keeps
+	// running on the signed session without contacting AuthForge. It is
+	// the session token lifetime requested from the server on Login. Zero
+	// means "use the server default" (24h today). Server clamps to
+	// [1h, 7d]; out-of-range values are silently clamped.
 	SessionTTL time.Duration
 }
 
@@ -80,7 +93,7 @@ type LoginResult struct {
 type Client struct {
 	appID             string
 	appSecret         string
-	heartbeatMode     string
+	onlineHeartbeat   bool
 	heartbeatInterval time.Duration
 	apiBaseURL        string
 	onFailure         func(error string)
@@ -162,9 +175,10 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(cfg.HeartbeatMode))
-	if mode != "local" && mode != "server" {
-		return nil, fmt.Errorf("authforge: heartbeat mode must be \"local\" or \"server\"")
+	if mode != "" && mode != "local" && mode != "server" {
+		return nil, fmt.Errorf("authforge: heartbeat mode must be \"local\" or \"server\" (deprecated; use OnlineHeartbeat instead)")
 	}
+	onlineHeartbeat := cfg.OnlineHeartbeat || mode == "server"
 
 	interval := cfg.HeartbeatInterval
 	if interval <= 0 {
@@ -200,7 +214,7 @@ func New(cfg Config) (*Client, error) {
 		appID:             strings.TrimSpace(cfg.AppID),
 		appSecret:         strings.TrimSpace(cfg.AppSecret),
 		publicKeys:        publicKeys,
-		heartbeatMode:     mode,
+		onlineHeartbeat:   onlineHeartbeat,
 		heartbeatInterval: interval,
 		apiBaseURL:        baseURL,
 		onFailure:         cfg.OnFailure,
@@ -409,7 +423,7 @@ func (c *Client) startHeartbeat() {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.heartbeatCtx = ctx
 	c.heartbeatCancel = cancel
-	mode := c.heartbeatMode
+	onlineHeartbeat := c.onlineHeartbeat
 	interval := c.heartbeatInterval
 	c.heartbeatWg.Add(1)
 	c.mu.Unlock()
@@ -426,10 +440,10 @@ func (c *Client) startHeartbeat() {
 				return
 			case <-ticker.C:
 				var err error
-				if mode == "server" {
+				if onlineHeartbeat {
 					err = c.serverHeartbeat()
 				} else {
-					err = c.localHeartbeat()
+					err = c.gracePeriodCheck()
 				}
 				if err != nil {
 					if c.onFailure != nil {
@@ -472,7 +486,10 @@ func (c *Client) serverHeartbeat() error {
 	return err
 }
 
-func (c *Client) localHeartbeat() error {
+// gracePeriodCheck enforces the grace period: it re-verifies the signed
+// session obtained at activation and fails with ErrSessionExpired once the
+// session TTL has elapsed. It makes no network calls.
+func (c *Client) gracePeriodCheck() error {
 	c.mu.Lock()
 	payload := c.rawPayloadB64
 	signature := c.signature

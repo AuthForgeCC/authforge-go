@@ -1,8 +1,32 @@
 ﻿# AuthForge Go SDK
 
-Official Go SDK for [AuthForge](https://authforge.cc) with Ed25519-verified license validation and background heartbeats.
+Official Go SDK for [AuthForge](https://authforge.cc). Activate a license online with an Ed25519-verified response, then run through the grace period by default (no further network calls), or opt in to online check-ins for fast revocation.
 
 **Zero external dependencies.** Uses only the Go standard library.
+
+## How licensing works
+
+1. **Activate (validate) online.** `Login` calls `POST /auth/validate`. The server checks revocation, expiry, HWID slots, and credits, and returns an Ed25519-signed session with a TTL.
+2. **Grace period (the default).** After activation, the app keeps running on the signed session without contacting AuthForge. The SDK periodically re-verifies the signed session locally and fails with `ErrSessionExpired` when the TTL expires. The grace period equals the session TTL: default 24h, and the server clamps requested values to `[1h, 7d]` (set it with `SessionTTL`).
+3. **Online check-ins (optional).** Set `OnlineHeartbeat: true` to call `POST /auth/heartbeat` periodically. This gives you fast revocation and concurrent-use detection: a revoked license fails on the very next check-in instead of at the end of the grace period.
+
+## Features
+
+Everything in this list ships in `authforge.go`, `crypto.go`, and `hwid.go` today:
+
+- **License activation** via `POST /auth/validate`, returning a signed `LoginResult`.
+- **Ed25519 signature verification** on every `/auth/validate` and `/auth/heartbeat` response; tampered or unsigned responses are rejected.
+- **Key rotation**: configure `PublicKey` (single key or comma-separated string) and/or `PublicKeys` (rotation set). The SDK trusts a signature that matches **any** configured key, so you can roll the server-side signing key without breaking deployed clients.
+- **Nonce anti-replay**: a fresh 128-bit nonce is sent on every request and the echoed nonce in the signed payload is checked before the response is accepted.
+- **HWID fingerprinting**: deterministic device hash from hostname + OS + arch + MAC, with graceful fallback.
+- **`HWIDOverride`**: bind to any identity instead of the machine (for example `tg:<id>`, `discord:<id>`).
+- **Seat enforcement**: the server binds each HWID into a license's free slots up to `maxHwidSlots`; `HwidCount` / `MaxHwidSlots` are surfaced on `LoginResult`. A shared (unlimited-seat) key skips per-device binding.
+- **Grace period by default, online check-ins opt-in** (see [Grace period and online check-ins](#grace-period-and-online-check-ins)).
+- **Self-ban** (`SelfBan(...)`) for anti-tamper response, both pre-session and post-session.
+- **Grace period duration** control via `SessionTTL`, with server-side clamping to `[1h, 7d]`.
+- **App variables / license variables** for feature flags and tiered licensing.
+- **Automatic retries** for rate-limited and transient network failures, with a fresh nonce per retry.
+- **Returns errors instead of exiting**: unlike the Python/Node/C#/C++ SDKs, the Go SDK never calls `os.Exit`; `Login`/`ValidateLicense` return errors and background failures are reported through `OnFailure`.
 
 ## Installation
 
@@ -17,7 +41,7 @@ Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.0.2`**). Without an `
 ### Local module with `replace` (forks, air-gapped builds, or hacking on the SDK)
 
 1. Clone this repository somewhere on your machine (for example next to your application).
-2. In your applicationâ€™s `go.mod`, require the module path and add a `replace` to your local checkout:
+2. In your application's `go.mod`, require the module path and add a `replace` to your local checkout:
 
 ```go
 module example.com/myapp
@@ -37,7 +61,7 @@ You can vendor `authforge.go`, `hwid.go`, `crypto.go`, and related files into yo
 
 ## Quick start
 
-The quick start below assumes `go get` (or a `replace` pointing at a local clone) is configured as in **Installation**.
+The quick start below assumes `go get` (or a `replace` pointing at a local clone) is configured as in **Installation**. It activates online once, then runs through the grace period (no further network calls):
 
 ```go
 package main
@@ -51,10 +75,9 @@ import (
 
 func main() {
 	client, err := authforge.New(authforge.Config{
-		AppID:         "YOUR_APP_ID",
-		AppSecret:     "YOUR_APP_SECRET",
-		PublicKey:     "YOUR_PUBLIC_KEY",
-		HeartbeatMode: "server",
+		AppID:     "YOUR_APP_ID",
+		AppSecret: "YOUR_APP_SECRET",
+		PublicKey: "YOUR_PUBLIC_KEY",
 		OnFailure: func(errMsg string) {
 			fmt.Fprintf(os.Stderr, "Auth failed: %s\n", errMsg)
 			os.Exit(1)
@@ -75,57 +98,99 @@ func main() {
 }
 ```
 
+To enable online check-ins instead, add `OnlineHeartbeat: true` (and optionally tune `HeartbeatInterval`).
+
 ## Config
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `AppID` | `string` | required | App ID from dashboard |
 | `AppSecret` | `string` | required | App secret from dashboard |
-| `PublicKey` | `string` | required | App Ed25519 public key (base64) from dashboard |
-| `HeartbeatMode` | `string` | required | `"server"` or `"local"` |
-| `HeartbeatInterval` | `time.Duration` | `15 * time.Minute` | Interval between heartbeat checks. Minimum supported interval is `10 * time.Second`; pick based on how fast you want revocations to propagate. |
+| `PublicKey` | `string` | required* | App Ed25519 public key (base64) from dashboard. Accepts a comma-separated trust list. *Required unless `PublicKeys` is set. |
+| `PublicKeys` | `[]string` | optional | Rotation set of trusted Ed25519 public keys. When non-empty, takes precedence over `PublicKey`; the SDK trusts a signature matching **any** entry (see [Key rotation](#key-rotation)). |
+| `OnlineHeartbeat` | `bool` | `false` | Enables online check-ins: periodic `POST /auth/heartbeat` for fast revocation and concurrent-use detection. When `false`, the SDK relies on the grace period. |
+| `HeartbeatMode` | `string` | `""` | Deprecated, see [Migrating from HeartbeatMode](#migrating-from-heartbeatmode). Empty means the default grace period behavior; `"server"` maps to `OnlineHeartbeat: true`; `"local"` maps to the default. |
+| `HeartbeatInterval` | `time.Duration` | `15 * time.Minute` | Interval between background checks (online check-ins or local grace period re-verification). Minimum supported interval is `10 * time.Second`; pick based on how fast you want revocations to propagate. |
 | `APIBaseURL` | `string` | `https://auth.authforge.cc` | API base URL override |
-| `OnFailure` | `func(error string)` | `nil` | Called when background heartbeat fails |
+| `OnFailure` | `func(error string)` | `nil` | Called when a background check fails |
 | `RequestTimeout` | `time.Duration` | `15 * time.Second` | HTTP timeout per request |
-| `SessionTTL` | `time.Duration` | `0` (server default: 24h) | Requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Heartbeats refresh the session while preserving the requested TTL. |
+| `SessionTTL` | `time.Duration` | `0` (server default: 24h) | The grace period duration: requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Online check-ins refresh the session while preserving the requested TTL. |
 | `HWIDOverride` | `string` | `""` | Optional custom hardware/subject identifier. When non-empty, the SDK sends this value instead of generated device fingerprint data. |
 
 ### Identity-based binding example (Telegram/Discord)
 
 ```go
 client, err := authforge.New(authforge.Config{
-    AppID:         "YOUR_APP_ID",
-    AppSecret:     "YOUR_APP_SECRET",
-    PublicKey:     "YOUR_PUBLIC_KEY",
-    HeartbeatMode: "server",
-    HWIDOverride:  fmt.Sprintf("tg:%d", telegramUserID), // or fmt.Sprintf("discord:%d", discordUserID)
+    AppID:           "YOUR_APP_ID",
+    AppSecret:       "YOUR_APP_SECRET",
+    PublicKey:       "YOUR_PUBLIC_KEY",
+    OnlineHeartbeat: true,
+    HWIDOverride:    fmt.Sprintf("tg:%d", telegramUserID), // or fmt.Sprintf("discord:%d", discordUserID)
 })
+```
+
+### Key rotation
+
+To rotate the server-side signing key without a flag-day, configure both the
+**new** and **previous** keys; the SDK accepts a signature matching any entry:
+
+```go
+client, err := authforge.New(authforge.Config{
+    AppID:      "YOUR_APP_ID",
+    AppSecret:  "YOUR_APP_SECRET",
+    PublicKeys: []string{"NEW_PUBLIC_KEY", "PREVIOUS_PUBLIC_KEY"},
+})
+```
+
+A comma-separated `PublicKey` (`"NEW,PREVIOUS"`) works too, for env-var convenience.
+
+## Grace period and online check-ins
+
+**Grace period (the default).** After one successful online activation, the app keeps running on the signed session without contacting AuthForge. The SDK re-verifies the cached signed payload locally on every `HeartbeatInterval` tick and fails with `ErrSessionExpired` once the session TTL elapses. The grace period equals the session TTL: default 24h, server-clamped to `[1h, 7d]` (set with `SessionTTL`). This is session continuation, not persistent offline licensing: a mid-session revocation only takes effect at the next online activation.
+
+**Online check-ins (`OnlineHeartbeat: true`).** The SDK sends `POST /auth/heartbeat` on every interval. Revocation and concurrent-use detection take effect on the very next check-in, and each successful check-in refreshes the session.
+
+## Migrating from HeartbeatMode
+
+`Config.HeartbeatMode` is deprecated but still works:
+
+- `HeartbeatMode: "local"` maps to the default grace period behavior. Remove the field.
+- `HeartbeatMode: "server"` maps to online check-ins. Replace it with `OnlineHeartbeat: true`.
+- An empty `HeartbeatMode` is now valid and means the default grace period behavior.
+- Any other value still returns an error from `New`.
+- If both fields are set, either one enables online check-ins: `HeartbeatMode: "server"` is not overridden by `OnlineHeartbeat: false`.
+
+```go
+// Before:
+authforge.Config{ /* ... */ HeartbeatMode: "server"}
+// After:
+authforge.Config{ /* ... */ OnlineHeartbeat: true}
+
+// Before:
+authforge.Config{ /* ... */ HeartbeatMode: "local"}
+// After (grace period is the default):
+authforge.Config{ /* ... */ }
 ```
 
 ## Billing
 
 - **1 `Login` or `ValidateLicense` call = 1 credit** (one `/auth/validate` debit each).
-- **10 heartbeats on the same license = 1 credit** (debited every 10th successful heartbeat).
+- **10 online check-ins on the same license = 1 credit** (debited every 10th successful check-in). The grace period costs nothing after activation.
 
-This means a session-style app running for 6 hours at a 15-minute interval burns ~1 validation + ~24 heartbeats = ~3.4 credits/day. `/auth/heartbeat` is limited to 6 requests/minute per license key, so keep intervals at 10 seconds or higher and choose cadence based on revocation speed needs (they always land on the **next** heartbeat).
+This means a session-style app running for 6 hours at a 15-minute check-in interval burns ~1 validation + ~24 check-ins = ~3.4 credits/day. `/auth/heartbeat` is limited to 6 requests/minute per license key, so keep intervals at 10 seconds or higher and choose cadence based on revocation speed needs (they always land on the **next** check-in).
 
 ## Methods
 
 | Method | Returns | Description |
 |---|---|---|
-| `Login(licenseKey string)` | `(*LoginResult, error)` | Validates key and stores signed session (`sessionToken`, `expiresIn`, `appVariables`, `licenseVariables`) |
-| `ValidateLicense(licenseKey string)` | `(*LoginResult, error)` | Same `/auth/validate` + signatures as `Login`; does not persist session or start heartbeats; does not invoke `OnFailure` for validate or network errors |
+| `Login(licenseKey string)` | `(*LoginResult, error)` | Activates the key online and stores the signed session (`sessionToken`, `expiresIn`, `appVariables`, `licenseVariables`) |
+| `ValidateLicense(licenseKey string)` | `(*LoginResult, error)` | Same `/auth/validate` + signatures as `Login`; does not persist session or start background checks; does not invoke `OnFailure` for validate or network errors |
 | `SelfBan(...)` | `(map[string]interface{}, error)` | Requests `/auth/selfban` to blacklist HWID/IP and optionally revoke (session-authenticated only) |
-| `Logout()` | `void` | Stops heartbeat and clears all session/auth state |
+| `Logout()` | `void` | Stops background checks and clears all session/auth state |
 | `IsAuthenticated()` | `bool` | True when an active authenticated session exists |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Full decoded payload map |
 | `GetAppVariables()` / `AppVariables()` | `map[string]interface{}` | App-scoped variables map |
 | `GetLicenseVariables()` / `LicenseVariables()` | `map[string]interface{}` | License-scoped variables map |
-
-## Heartbeat modes
-
-- `server`: sends `POST /auth/heartbeat` on every interval.
-- `local`: verifies stored signature and expiry timestamp locally without heartbeat network calls; expires with `ErrSessionExpired`.
 
 ## Error handling
 
@@ -146,6 +211,8 @@ if err != nil {
 		// HWID slots full
 	case errors.Is(err, authforge.ErrNoCredits):
 		// account has no credits
+	case errors.Is(err, authforge.ErrAppBurnCapReached):
+		// app credit burn cap reached
 	case errors.Is(err, authforge.ErrBlocked):
 		// blocked by security rules
 	case errors.Is(err, authforge.ErrRateLimited):
@@ -155,7 +222,7 @@ if err != nil {
 	case errors.Is(err, authforge.ErrAppDisabled):
 		// app disabled
 	case errors.Is(err, authforge.ErrSessionExpired):
-		// session expired
+		// session expired (grace period ended)
 	case errors.Is(err, authforge.ErrRevokeRequiresSession):
 		// attempted pre-session revoke
 	case errors.Is(err, authforge.ErrBadRequest):
@@ -170,7 +237,7 @@ if err != nil {
 }
 ```
 
-`ValidateLicense` returns the same error types as `Login` but **does not** call `OnFailure` for failed validate or network errors (heartbeats still use `OnFailure` on failure).
+`ValidateLicense` returns the same error types as `Login` but **does not** call `OnFailure` for failed validate or network errors (background checks still use `OnFailure` on failure).
 
 Internal request retries are automatic:
 - `rate_limited`: retry after 2s, then 5s (max 3 attempts total)

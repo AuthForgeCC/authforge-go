@@ -78,10 +78,9 @@ func TestConfigAcceptsCommaSeparatedPublicKey(t *testing.T) {
 	vectors := loadVectors(t)
 	const decoy = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	client, err := New(Config{
-		AppID:         "app",
-		AppSecret:     "secret",
-		PublicKey:     decoy + "," + vectors.PublicKey,
-		HeartbeatMode: "local",
+		AppID:     "app",
+		AppSecret: "secret",
+		PublicKey: decoy + "," + vectors.PublicKey,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -95,10 +94,9 @@ func TestConfigPublicKeysFieldRotationSet(t *testing.T) {
 	vectors := loadVectors(t)
 	const decoy = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	client, err := New(Config{
-		AppID:         "app",
-		AppSecret:     "secret",
-		PublicKeys:    []string{decoy, vectors.PublicKey},
-		HeartbeatMode: "local",
+		AppID:      "app",
+		AppSecret:  "secret",
+		PublicKeys: []string{decoy, vectors.PublicKey},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -110,12 +108,95 @@ func TestConfigPublicKeysFieldRotationSet(t *testing.T) {
 
 func TestConfigRequiresPublicKey(t *testing.T) {
 	_, err := New(Config{
-		AppID:         "app-1",
-		AppSecret:     "secret-1",
-		HeartbeatMode: "local",
+		AppID:     "app-1",
+		AppSecret: "secret-1",
 	})
 	if err == nil {
 		t.Fatal("expected missing public key validation error")
+	}
+}
+
+// The default policy is the grace period: an empty HeartbeatMode is valid
+// and online check-ins stay disabled.
+func TestNewDefaultsToGracePeriod(t *testing.T) {
+	vectors := loadVectors(t)
+	client, err := New(Config{
+		AppID:     "app",
+		AppSecret: "secret",
+		PublicKey: vectors.PublicKey,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.onlineHeartbeat {
+		t.Fatal("online check-ins should be disabled by default")
+	}
+}
+
+// The deprecated HeartbeatMode "server" must keep mapping to online check-ins.
+func TestDeprecatedServerModeEnablesOnlineHeartbeat(t *testing.T) {
+	vectors := loadVectors(t)
+	client, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKey:     vectors.PublicKey,
+		HeartbeatMode: "server",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !client.onlineHeartbeat {
+		t.Fatal("HeartbeatMode \"server\" should enable online check-ins")
+	}
+}
+
+// The deprecated HeartbeatMode "local" must keep mapping to the default
+// grace period behavior.
+func TestDeprecatedLocalModeStaysGracePeriod(t *testing.T) {
+	vectors := loadVectors(t)
+	client, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKey:     vectors.PublicKey,
+		HeartbeatMode: "local",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.onlineHeartbeat {
+		t.Fatal("HeartbeatMode \"local\" should keep online check-ins disabled")
+	}
+}
+
+func TestOnlineHeartbeatFieldEnablesOnlineCheckIns(t *testing.T) {
+	vectors := loadVectors(t)
+	client, err := New(Config{
+		AppID:           "app",
+		AppSecret:       "secret",
+		PublicKey:       vectors.PublicKey,
+		OnlineHeartbeat: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !client.onlineHeartbeat {
+		t.Fatal("OnlineHeartbeat: true should enable online check-ins")
+	}
+}
+
+func TestInvalidHeartbeatModeStillErrors(t *testing.T) {
+	vectors := loadVectors(t)
+	_, err := New(Config{
+		AppID:         "app",
+		AppSecret:     "secret",
+		PublicKey:     vectors.PublicKey,
+		HeartbeatMode: "offline",
+	})
+	if err == nil {
+		t.Fatal("expected invalid heartbeat mode error")
+	}
+	if !strings.Contains(err.Error(), "heartbeat mode must be") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }
 
@@ -148,11 +229,10 @@ func TestValidateLicenseSuccessDoesNotStartHeartbeat(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client, err := New(Config{
-		AppID:         "app",
-		AppSecret:     "secret",
-		PublicKey:     vectors.PublicKey,
-		HeartbeatMode: "local",
-		APIBaseURL:    srv.URL,
+		AppID:      "app",
+		AppSecret:  "secret",
+		PublicKey:  vectors.PublicKey,
+		APIBaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -188,11 +268,10 @@ func TestValidateLicenseInvalidKeyNoHeartbeat(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client, err := New(Config{
-		AppID:         "app",
-		AppSecret:     "secret",
-		PublicKey:     "0wRcYWn44wk9tHOisXgso1wbtUqpFdy0IeMk4HXDiNc=",
-		HeartbeatMode: "local",
-		APIBaseURL:    srv.URL,
+		AppID:      "app",
+		AppSecret:  "secret",
+		PublicKey:  "0wRcYWn44wk9tHOisXgso1wbtUqpFdy0IeMk4HXDiNc=",
+		APIBaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
