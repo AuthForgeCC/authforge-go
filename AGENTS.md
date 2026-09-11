@@ -1,4 +1,4 @@
-﻿# AuthForge SDK: AI Agent Reference
+# AuthForge SDK: AI Agent Reference
 
 > This file is optimized for AI coding agents (Cursor, Copilot, Claude Code, etc.).
 > It contains everything needed to correctly integrate AuthForge licensing into a project.
@@ -14,16 +14,19 @@ After activation there are two policies:
 
 When a background check fails (revocation on a check-in, or the grace period ending), `OnFailure` is invoked and you handle it (typically exit the app).
 
+There is also a **separate** mode for machines that can never reach the internet: **offline license files (`.authforge`)**. The operator mints a signed file in the AuthForge cloud; `LoginFromFile` verifies it locally with the app public key and the machine HWID, with zero network calls. Only use it when the user explicitly asks for air-gapped / offline-file licensing. The default integration is always online `Login` + grace period.
+
 ## Billing model (so you can pick sensible settings)
 
 - **1 activation = 1 credit** (`Login` or `ValidateLicense` call).
 - **10 online check-ins = 1 credit** (billed on every 10th successful check-in, per license). The grace period costs nothing after activation.
+- **1 offline file mint = 1 credit** (charged to the operator when the file is minted). `LoginFromFile` / `VerifyLicenseFile` cost nothing.
 - Keep `HeartbeatInterval` at `>= 10s` (`15m` is the common desktop default). `/auth/heartbeat` is limited to 6 requests/minute per license key; billing still scales with check-in count.
 - With online check-ins, revocation takes effect on the **very next check-in** regardless of interval. With the grace period only, a revocation takes effect at the next online activation.
 
 ## Installation
 
-Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.0.2`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
+Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.2.0`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
 
 ## Minimal working integration
 
@@ -114,6 +117,11 @@ For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<
 | `New(Config)` | `(*Client, error)` | Validates config, constructs client |
 | `Login(licenseKey string)` | `(*LoginResult, error)` | Activates the license online and starts the background check loop |
 | `ValidateLicense(licenseKey string)` | `(*LoginResult, error)` | Same validate + signatures as `Login`; no session persistence or background checks; does not call `OnFailure` |
+| `LoginFromFile(pathOrText string)` | `(*OfflineLicense, error)` | Offline mode: verifies a `.authforge` file locally (no network), authenticates the client, never starts background checks. Errors are `ErrOffline*` sentinels (`errors.Is`), echoed to `OnFailure` as `offline_login_failed: <code>` |
+| `VerifyLicenseFile(pathOrText string)` | `(*OfflineLicense, error)` | Same offline checks without changing client state |
+| `OfflineLicense()` | `*OfflineLicense` | `JTI`, `ExpiresAt`, `HwidPolicy`, … of the offline file in use, or `nil` |
+| `GetSessionKind()` | `SessionKind` | `SessionKindOnline`, `SessionKindOffline`, or `SessionKindNone` when logged out |
+| `HWID()` | `string` | HWID this client sends; the customer reports it so the operator can mint a bound file |
 | `Logout()` | (none) | Stops background checks and clears state |
 | `IsAuthenticated()` | `bool` | Whether authenticated |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Payload map |
@@ -147,6 +155,28 @@ if tier, ok := vars["tier"]; ok {
 client.Logout()
 ```
 
+### Offline license file (air-gapped machine, only when asked)
+
+```go
+// Step 1 (customer machine): print the HWID so the operator can bind the file to it.
+fmt.Println(client.HWID())
+
+// Step 2 (operator): mint the .authforge file in the dashboard or via
+// POST /v1/licenses/{licenseKey}/offline-files and deliver it out-of-band.
+
+// Step 3 (customer machine): authorize with the file. No network, no check-ins.
+lic, err := client.LoginFromFile("license.authforge")
+if err != nil {
+	// errors.Is against authforge.ErrOfflineBadArmor | ErrOfflineBadSignature |
+	// ErrOfflineUnsupportedVersion | ErrOfflineMalformedPayload | ErrOfflineWrongApp |
+	// ErrOfflineExpired | ErrOfflineHwidMismatch; authforge.OfflineErrorCode(err) gives the code string.
+	log.Fatal(err)
+}
+_ = lic.ExpiresAt // nil = lifetime file
+```
+
+Offline file error sentinels (in check order): `ErrOfflineBadArmor`, `ErrOfflineBadSignature`, `ErrOfflineUnsupportedVersion`, `ErrOfflineMalformedPayload`, `ErrOfflineWrongApp`, `ErrOfflineExpired`, `ErrOfflineHwidMismatch`.
+
 ### Custom error handling
 
 Use `errors.Is` with `authforge.ErrInvalidKey`, `authforge.ErrExpired`, etc. on `Login` errors. `OnFailure` receives background check error strings (and `network_error` on some transport failures).
@@ -157,3 +187,11 @@ Use `errors.Is` with `authforge.ErrInvalidKey`, `authforge.ErrExpired`, etc. on 
 - Do not skip `OnFailure`: it is invoked when a background check fails (revocation on an online check-in, or the grace period ending)
 - Do not call `Login` on every app action: call once at startup; the grace period or online check-ins handle the rest
 - Do not set the deprecated `HeartbeatMode` in new code: leave it empty for the default grace period, or set `OnlineHeartbeat: true` for online check-ins
+- Do not treat the grace period as persistent offline licensing: it is session continuation after one successful online activation, and revocations are only picked up at the next online validate or check-in
+- Do not reach for `LoginFromFile` unless the user explicitly needs air-gapped / offline-file licensing: the default is online `Login` + grace period
+- Do not expect an online revoke to disable an offline file that is already on a customer machine: the file stays valid until its own `ExpiresAt`; prefer short expiries and HWID-bound files
+- Do not mint or accept `hwid.mode: "any"` files casually: anyone who copies an unbound file has a working license
+- Do not call `LoginFromFile` with another app's public key or app id: the file is rejected with `ErrOfflineBadSignature` / `ErrOfflineWrongApp` by design
+- Do not try to build `.authforge` files client-side: only the AuthForge cloud holds the signing key; there is no BYO issuer
+- Do not call `SelfBan` or any other online method after `LoginFromFile`: an offline session has no server session (`GetSessionKind()` is `SessionKindOffline`), so `SelfBan` returns `ErrOfflineSession` without contacting the server and online check-ins never start; machines that can reach AuthForge should use online `Login`
+- Do not bind an offline file to an HWID reported by a different SDK or language: HWID fingerprints are not portable across SDKs, so collect the HWID from the exact SDK build that will load the file (or use the HWID override with an identifier you control)

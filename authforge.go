@@ -36,7 +36,36 @@ var (
 	ErrBadRequest            = errors.New("authforge: bad request")
 	ErrServerError           = errors.New("authforge: server error")
 	ErrSignatureMismatch     = errors.New("authforge: signature verification failed")
+	// ErrOfflineSession is returned by SelfBan when the client authenticated
+	// with LoginFromFile and no explicit license key / session token was
+	// given: an offline session has no server session and never phones home.
+	ErrOfflineSession = errors.New("authforge: offline_session")
 )
+
+// SessionKind says how the client authenticated.
+type SessionKind int
+
+const (
+	// SessionKindNone means the client is not authenticated.
+	SessionKindNone SessionKind = iota
+	// SessionKindOnline is a server session from Login / ValidateLicense.
+	SessionKindOnline
+	// SessionKindOffline is a locally verified .authforge file from LoginFromFile.
+	SessionKindOffline
+)
+
+func (k SessionKind) String() string {
+	switch k {
+	case SessionKindNone:
+		return "none"
+	case SessionKindOnline:
+		return "online"
+	case SessionKindOffline:
+		return "offline"
+	default:
+		return fmt.Sprintf("SessionKind(%d)", int(k))
+	}
+}
 
 type Config struct {
 	AppID     string
@@ -104,9 +133,12 @@ type Client struct {
 
 	hwid string
 
-	mu               sync.Mutex
-	licenseKey       string
-	sessionToken     string
+	mu           sync.Mutex
+	licenseKey   string
+	sessionToken string
+	// sessionKind drives IsAuthenticated, SelfBan and the heartbeat guard so
+	// an offline file session can never be mistaken for a server session.
+	sessionKind      SessionKind
 	publicKeys       [][]byte
 	sessionExpiresIn int64
 	lastNonce        string
@@ -116,6 +148,8 @@ type Client struct {
 	appVariables     map[string]interface{}
 	licenseVariables map[string]interface{}
 	authenticated    bool
+	// offlineLicense is set when the client authenticated via LoginFromFile.
+	offlineLicense *OfflineLicense
 
 	heartbeatCtx    context.Context
 	heartbeatCancel context.CancelFunc
@@ -267,10 +301,20 @@ func (c *Client) SelfBan(
 	c.mu.Lock()
 	currentSession := c.sessionToken
 	currentLicense := c.licenseKey
+	currentKind := c.sessionKind
 	hwid := c.hwid
 	c.mu.Unlock()
 
 	resolvedSession := strings.TrimSpace(sessionToken)
+	explicitLicense := strings.TrimSpace(licenseKey)
+
+	// An offline session has no server session and must never phone home on
+	// its own. Callers who pass an explicit licenseKey/sessionToken are asking
+	// about a *different* credential and still get the normal paths.
+	if currentKind == SessionKindOffline && resolvedSession == "" && explicitLicense == "" {
+		return nil, ErrOfflineSession
+	}
+
 	if resolvedSession == "" {
 		resolvedSession = strings.TrimSpace(currentSession)
 	}
@@ -293,7 +337,7 @@ func (c *Client) SelfBan(
 		return response, nil
 	}
 
-	resolvedLicense := strings.TrimSpace(licenseKey)
+	resolvedLicense := explicitLicense
 	if resolvedLicense == "" {
 		resolvedLicense = strings.TrimSpace(currentLicense)
 	}
@@ -332,6 +376,7 @@ func (c *Client) Logout() {
 	c.heartbeatCtx = nil
 	c.licenseKey = ""
 	c.sessionToken = ""
+	c.sessionKind = SessionKindNone
 	c.sessionExpiresIn = 0
 	c.lastNonce = ""
 	c.rawPayloadB64 = ""
@@ -340,6 +385,7 @@ func (c *Client) Logout() {
 	c.appVariables = map[string]interface{}{}
 	c.licenseVariables = map[string]interface{}{}
 	c.authenticated = false
+	c.offlineLicense = nil
 	c.mu.Unlock()
 
 	if cancel != nil {
@@ -348,10 +394,33 @@ func (c *Client) Logout() {
 	}
 }
 
+// IsAuthenticated is true for an online session (Login) or an offline one
+// (LoginFromFile).
 func (c *Client) IsAuthenticated() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.authenticated && c.sessionToken != ""
+	if !c.authenticated {
+		return false
+	}
+	switch c.sessionKind {
+	case SessionKindOnline:
+		return c.sessionToken != ""
+	case SessionKindOffline:
+		return true
+	case SessionKindNone:
+		return false
+	default:
+		return false
+	}
+}
+
+// GetSessionKind reports how the client authenticated: SessionKindOnline
+// after Login, SessionKindOffline after LoginFromFile, SessionKindNone when
+// logged out.
+func (c *Client) GetSessionKind() SessionKind {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionKind
 }
 
 func (c *Client) SessionData() map[string]interface{} {
@@ -415,7 +484,9 @@ func (c *Client) validateOnce(licenseKey string, persistSession bool, invokeOnNe
 
 func (c *Client) startHeartbeat() {
 	c.mu.Lock()
-	if c.heartbeatCancel != nil {
+	// Offline sessions have no grace period and no online check-ins: the
+	// file's own expiresAt is the only clock. Never start a goroutine for them.
+	if c.heartbeatCancel != nil || c.sessionKind == SessionKindOffline {
 		c.mu.Unlock()
 		return
 	}
@@ -604,6 +675,7 @@ func (c *Client) applySignedResponse(
 		c.licenseKey = licenseKey
 	}
 	c.sessionToken = sessionToken
+	c.sessionKind = SessionKindOnline
 	c.sessionExpiresIn = expiresIn
 	c.lastNonce = expectedNonce
 	c.rawPayloadB64 = payloadB64
