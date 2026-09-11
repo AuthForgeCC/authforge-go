@@ -26,7 +26,7 @@ There is also a **separate** mode for machines that can never reach the internet
 
 ## Installation
 
-Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.2.0`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
+Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.2.1`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
 
 ## Minimal working integration
 
