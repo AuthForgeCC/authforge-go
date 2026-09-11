@@ -116,6 +116,24 @@ func TestConfigRequiresPublicKey(t *testing.T) {
 	}
 }
 
+func TestNewAllowsEmptyAppSecret(t *testing.T) {
+	vectors := loadVectors(t)
+	client, err := New(Config{
+		AppID:     "app",
+		PublicKey: vectors.PublicKey,
+	})
+	if err != nil {
+		t.Fatalf("empty app secret should be allowed: %v", err)
+	}
+	_, err = client.Login("XXXX-XXXX-XXXX-XXXX")
+	if err == nil {
+		t.Fatal("expected Login to require app secret")
+	}
+	if !strings.Contains(err.Error(), "app secret is required for online APIs") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // The default policy is the grace period: an empty HeartbeatMode is valid
 // and online check-ins stay disabled.
 func TestNewDefaultsToGracePeriod(t *testing.T) {

@@ -108,7 +108,7 @@ To enable online check-ins instead, add `OnlineHeartbeat: true` (and optionally 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `AppID` | `string` | required | App ID from dashboard |
-| `AppSecret` | `string` | required | App secret from dashboard |
+| `AppSecret` | `string` | required for online APIs; empty for `LoginFromFile` only | App secret from dashboard. Do not ship it in air-gapped binaries. |
 | `PublicKey` | `string` | required* | App Ed25519 public key (base64) from dashboard. Accepts a comma-separated trust list. *Required unless `PublicKeys` is set. |
 | `PublicKeys` | `[]string` | optional | Rotation set of trusted Ed25519 public keys. When non-empty, takes precedence over `PublicKey`; the SDK trusts a signature matching **any** entry (see [Key rotation](#key-rotation)). |
 | `OnlineHeartbeat` | `bool` | `false` | Enables online check-ins: periodic `POST /auth/heartbeat` for fast revocation and concurrent-use detection. When `false`, the SDK relies on the grace period. |
@@ -155,7 +155,7 @@ A comma-separated `PublicKey` (`"NEW,PREVIOUS"`) works too, for env-var convenie
 
 ## Offline license files (`.authforge`)
 
-For machines that never connect to the internet, the operator mints a **signed offline license file** in the AuthForge dashboard (License page -> *Mint .authforge file*) or via `POST /v1/licenses/{licenseKey}/offline-files`. The file is a standalone Ed25519-signed document; the SDK verifies it with **only** your app public key and the machine HWID. It never contacts AuthForge and never starts online check-ins.
+For machines that never connect to the internet, the operator mints a **signed offline license file** in the AuthForge dashboard (License page -> *Mint .authforge file*) or via `POST /v1/licenses/{licenseKey}/offline-files`. The file is a standalone Ed25519-signed document; the SDK verifies it with **only** your app public key and the machine HWID. It never contacts AuthForge and never starts online check-ins. Leave `AppSecret` empty so the air-gapped binary does not contain the App Secret.
 
 | | Grace period (default) | Offline license file |
 | --- | --- | --- |
@@ -168,7 +168,6 @@ For machines that never connect to the internet, the operator mints a **signed o
 ```go
 client, err := authforge.New(authforge.Config{
 	AppID:     "YOUR_APP_ID",
-	AppSecret: "YOUR_APP_SECRET", // unused for offline files but still required by New
 	PublicKey: "YOUR_PUBLIC_KEY",
 	OnFailure: func(msg string) { log.Println("authforge:", msg) },
 })

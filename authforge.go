@@ -68,7 +68,10 @@ func (k SessionKind) String() string {
 }
 
 type Config struct {
-	AppID     string
+	AppID string
+	// AppSecret authenticates online APIs (Login, ValidateLicense, SelfBan).
+	// Leave empty for offline-only clients (LoginFromFile). Air-gapped
+	// builds should not ship the secret.
 	AppSecret string
 	// PublicKey is the trusted Ed25519 public key (base64-encoded). For the
 	// common single-key case set this directly; during a server-side rotation
@@ -192,9 +195,6 @@ func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.AppID) == "" {
 		return nil, fmt.Errorf("authforge: app id is required")
 	}
-	if strings.TrimSpace(cfg.AppSecret) == "" {
-		return nil, fmt.Errorf("authforge: app secret is required")
-	}
 	publicKeyStrings := collectPublicKeyStrings(cfg)
 	if len(publicKeyStrings) == 0 {
 		return nil, fmt.Errorf("authforge: public key is required")
@@ -263,6 +263,13 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	return client, nil
+}
+
+func (c *Client) requireAppSecret() error {
+	if strings.TrimSpace(c.appSecret) == "" {
+		return fmt.Errorf("authforge: app secret is required for online APIs; omit it only for LoginFromFile")
+	}
+	return nil
 }
 
 func (c *Client) Login(licenseKey string) (*LoginResult, error) {
@@ -343,6 +350,9 @@ func (c *Client) SelfBan(
 	}
 	if resolvedLicense == "" {
 		return nil, fmt.Errorf("authforge: missing license key")
+	}
+	if err := c.requireAppSecret(); err != nil {
+		return nil, err
 	}
 
 	nonce, err := generateNonce()
@@ -458,6 +468,9 @@ func (c *Client) validateWithRateLimitRetry(licenseKey string) (*LoginResult, er
 }
 
 func (c *Client) validateOnce(licenseKey string, persistSession bool, invokeOnNetworkFailure bool) (*LoginResult, error) {
+	if err := c.requireAppSecret(); err != nil {
+		return nil, err
+	}
 	nonce, err := generateNonce()
 	if err != nil {
 		return nil, err

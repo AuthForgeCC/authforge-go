@@ -14,7 +14,7 @@ After activation there are two policies:
 
 When a background check fails (revocation on a check-in, or the grace period ending), `OnFailure` is invoked and you handle it (typically exit the app).
 
-There is also a **separate** mode for machines that can never reach the internet: **offline license files (`.authforge`)**. The operator mints a signed file in the AuthForge cloud; `LoginFromFile` verifies it locally with the app public key and the machine HWID, with zero network calls. Only use it when the user explicitly asks for air-gapped / offline-file licensing. The default integration is always online `Login` + grace period.
+There is also a **separate** mode for machines that can never reach the internet: **offline license files (`.authforge`)**. The operator mints a signed file in the AuthForge cloud; `LoginFromFile` verifies it locally with the app public key and the machine HWID, with zero network calls. Do not ship the App Secret in those builds (leave `AppSecret` empty). Only use it when the user explicitly asks for air-gapped / offline-file licensing. The default integration is always online `Login` + grace period.
 
 ## Billing model (so you can pick sensible settings)
 
@@ -87,7 +87,7 @@ func main() {
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `AppID` | `string` | yes | (none) | Application ID |
-| `AppSecret` | `string` | yes | (none) | Application secret |
+| `AppSecret` | `string` | for online APIs | (none) | Application secret. Required for `Login` / `ValidateLicense` / `SelfBan`. Leave empty for `LoginFromFile` only; do not ship it in air-gapped binaries. |
 | `PublicKey` | `string` | yes* | (none) | Base64 Ed25519 public key from the dashboard. Accepts a comma-separated trust list. *Required unless `PublicKeys` is set |
 | `PublicKeys` | `[]string` | no | `nil` | Rotation set; when non-empty it takes precedence over `PublicKey`. The SDK trusts a signature matching **any** entry |
 | `OnlineHeartbeat` | `bool` | no | `false` | `true` enables online check-ins (periodic `POST /auth/heartbeat`). `false` means grace period only |
@@ -184,6 +184,7 @@ Use `errors.Is` with `authforge.ErrInvalidKey`, `authforge.ErrExpired`, etc. on 
 ## Do NOT
 
 - Do not hardcode the app secret as a plain string literal in source: use environment variables or encrypted config
+- Do not embed the App Secret in air-gapped / `LoginFromFile` builds: leave `AppSecret` empty; verification only needs app id + public key
 - Do not skip `OnFailure`: it is invoked when a background check fails (revocation on an online check-in, or the grace period ending)
 - Do not call `Login` on every app action: call once at startup; the grace period or online check-ins handle the rest
 - Do not set the deprecated `HeartbeatMode` in new code: leave it empty for the default grace period, or set `OnlineHeartbeat: true` for online check-ins

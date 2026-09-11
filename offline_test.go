@@ -155,7 +155,7 @@ func newOfflineTestClient(t *testing.T, good offlineVectorCase, mutate func(*Con
 	failures := []string{}
 	cfg := Config{
 		AppID:        good.AppID,
-		AppSecret:    "unused-offline",
+		AppSecret:    "",
 		PublicKey:    good.PublicKey,
 		HWIDOverride: good.HWID,
 		// Any network call would hit a closed port and fail loudly.
@@ -239,7 +239,12 @@ func TestOfflineSelfBanIsLocalErrorAndNeverPosts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, _ := newOfflineTestClient(t, good, func(c *Config) { c.APIBaseURL = srv.URL })
+	client, _ := newOfflineTestClient(t, good, func(c *Config) {
+		c.APIBaseURL = srv.URL
+		// Explicit-license SelfBan is an online API; this test covers that
+		// dual-mode path. Offline-only clients omit the secret entirely.
+		c.AppSecret = "online-selfban"
+	})
 	if _, err := client.LoginFromFile(good.File); err != nil {
 		t.Fatalf("LoginFromFile: %v", err)
 	}
