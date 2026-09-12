@@ -36,10 +36,10 @@ Everything in this list ships in `authforge.go`, `crypto.go`, `hwid.go`, and `of
 The module is **`github.com/AuthForgeCC/authforge-go`**. With a released version tag on GitHub, add it like any other public module:
 
 ```bash
-go get github.com/AuthForgeCC/authforge-go@v1.3.0
+go get github.com/AuthForgeCC/authforge-go@v1.3.1
 ```
 
-Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.2.1`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
+Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.3.1`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
 
 ### Local module with `replace` (forks, air-gapped builds, or hacking on the SDK)
 

@@ -374,6 +374,21 @@ func TestLoginFromFileReadsFromDiskAndVerifyIsSideEffectFree(t *testing.T) {
 	}
 }
 
+func TestActivationRequestSDKTagMatchesReleaseTag(t *testing.T) {
+	if !strings.HasPrefix(activationRequestSDKTag, "go/") {
+		t.Fatalf("activationRequestSDKTag = %q, want go/<semver>", activationRequestSDKTag)
+	}
+	version := strings.TrimPrefix(activationRequestSDKTag, "go/")
+	ref := os.Getenv("GITHUB_REF")
+	if !strings.HasPrefix(ref, "refs/tags/v") {
+		return
+	}
+	tag := strings.TrimPrefix(ref, "refs/tags/v")
+	if version != tag {
+		t.Fatalf("activationRequestSDKTag version %q does not match release tag %q", version, tag)
+	}
+}
+
 func TestCreateActivationRequestMatchesVectors(t *testing.T) {
 	raw, err := os.ReadFile("activation_request_vectors.json")
 	if err != nil {

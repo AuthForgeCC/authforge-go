@@ -16,6 +16,16 @@ jobs:
           go-version: "1.22"
       - name: Test
         run: go test -v ./...
+      - name: Activation request SDK tag matches release tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/v}"
+          TAG="${TAG//$'\r'/}"
+          GOT=$(grep -oE 'activationRequestSDKTag[[:space:]]+= "go/[0-9]+\.[0-9]+\.[0-9]+"' offline.go | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$TAG" != "$GOT" ]; then
+            echo "Tag v$TAG does not match activationRequestSDKTag go/$GOT"
+            exit 1
+          fi
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
