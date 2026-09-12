@@ -14,7 +14,7 @@ After activation there are two policies:
 
 When a background check fails (revocation on a check-in, or the grace period ending), `OnFailure` is invoked and you handle it (typically exit the app).
 
-There is also a **separate** mode for machines that can never reach the internet: **offline license files (`.authforge`)**. The operator mints a signed file in the AuthForge cloud; `LoginFromFile` verifies it locally with the app public key and the machine HWID, with zero network calls. Do not ship the App Secret in those builds (leave `AppSecret` empty). Only use it when the user explicitly asks for air-gapped / offline-file licensing. The default integration is always online `Login` + grace period.
+There is also a **separate** mode for machines that can never reach the internet: **offline license files (`.authforge`)**. The operator mints a signed file in the AuthForge cloud; `LoginFromFile` verifies it locally with the app public key and the machine HWID, with zero network calls. Do not ship the App Secret in those builds (leave `AppSecret` empty). Only use it when the user explicitly asks for air-gapped / offline-file licensing. The default integration is always online `Login` + grace period. To collect the HWID for a bound file, write an **activation request** (`.authforge-request`) with `CreateActivationRequest`. It is not a license, is not signed, and does not mint anything. Prefer it over printing the raw HWID.
 
 ## Billing model (so you can pick sensible settings)
 
@@ -122,6 +122,7 @@ For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<
 | `OfflineLicense()` | `*OfflineLicense` | `JTI`, `ExpiresAt`, `HwidPolicy`, … of the offline file in use, or `nil` |
 | `GetSessionKind()` | `SessionKind` | `SessionKindOnline`, `SessionKindOffline`, or `SessionKindNone` when logged out |
 | `HWID()` | `string` | HWID this client sends; the customer reports it so the operator can mint a bound file |
+| `CreateActivationRequest(opts ActivationRequestOptions)` | `string` | Unsigned `.authforge-request` for this machine. No network, no secret, callable before `Login`. Hostname omitted unless `IncludeMachineName` |
 | `Logout()` | (none) | Stops background checks and clears state |
 | `IsAuthenticated()` | `bool` | Whether authenticated |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Payload map |

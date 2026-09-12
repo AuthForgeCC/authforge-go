@@ -27,12 +27,14 @@ package authforge
 // joined, whitespace removed) - the same contract as /auth/validate.
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -432,4 +434,185 @@ func readLicenseFileInput(pathOrText string) (string, error) {
 		return "", fmt.Errorf("authforge: read license file: %w", err)
 	}
 	return string(data), nil
+}
+
+// ---------------------------------------------------------------------------
+// Activation requests (`.authforge-request`)
+//
+// Unsigned transport for a HWID so the operator can mint a bound `.authforge`
+// file without the customer pasting a raw string. Distinct markers from
+// BEGIN AUTHFORGE LICENSE. Not signed; the Checksum header is the only
+// integrity check. Keep activationRequestSDKTag in sync with the release tag.
+// ---------------------------------------------------------------------------
+
+const (
+	activationRequestVersion   = 1
+	activationRequestTyp       = "authforge-activation-request"
+	beginActivationRequest      = "-----BEGIN AUTHFORGE ACTIVATION REQUEST-----"
+	endActivationRequest        = "-----END AUTHFORGE ACTIVATION REQUEST-----"
+	activationRequestSDKTag    = "go/1.2.1"
+	armorLineWidth             = 64
+	maxRequestHWID             = 256
+	maxRequestMachineName      = 128
+	maxRequestOS                = 64
+	maxRequestSDK               = 64
+	maxRequestLicenseKey       = 64
+)
+
+// ActivationRequestOptions controls optional fields on CreateActivationRequest.
+// MachineName is omitted unless IncludeMachineName is true.
+type ActivationRequestOptions struct {
+	IncludeMachineName bool
+	MachineName        string
+	OS                 string
+	OmitOS             bool
+	SDK                string
+	OmitSDK            bool
+	LicenseKey         string
+	CreatedAt          string
+}
+
+func clipRequestField(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
+}
+
+func jsonEscapeRequest(value string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				b.WriteString(fmt.Sprintf(`\u00%02x`, r))
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func wrapArmor64(value string) string {
+	var lines []string
+	for i := 0; i < len(value); i += armorLineWidth {
+		end := i + armorLineWidth
+		if end > len(value) {
+			end = len(value)
+		}
+		lines = append(lines, value[i:end])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func detectOSLabel() string {
+	switch runtime.GOOS {
+	case "windows":
+		return clipRequestField("Windows", maxRequestOS)
+	case "darwin":
+		return clipRequestField("macOS", maxRequestOS)
+	case "linux":
+		return clipRequestField("Linux", maxRequestOS)
+	default:
+		return clipRequestField(runtime.GOOS, maxRequestOS)
+	}
+}
+
+func canonicalActivationRequestJSON(appID, hwid, createdAt, machineName, osName, sdk, licenseKey string) string {
+	parts := []string{
+		fmt.Sprintf(`"v":%d`, activationRequestVersion),
+		`"typ":` + jsonEscapeRequest(activationRequestTyp),
+		`"appId":` + jsonEscapeRequest(appID),
+		`"hwid":` + jsonEscapeRequest(clipRequestField(hwid, maxRequestHWID)),
+		`"createdAt":` + jsonEscapeRequest(createdAt),
+	}
+	if machineName != "" {
+		parts = append(parts, `"machineName":`+jsonEscapeRequest(clipRequestField(machineName, maxRequestMachineName)))
+	}
+	if osName != "" {
+		parts = append(parts, `"os":`+jsonEscapeRequest(clipRequestField(osName, maxRequestOS)))
+	}
+	if sdk != "" {
+		parts = append(parts, `"sdk":`+jsonEscapeRequest(clipRequestField(sdk, maxRequestSDK)))
+	}
+	if licenseKey != "" {
+		parts = append(parts, `"licenseKey":`+jsonEscapeRequest(clipRequestField(licenseKey, maxRequestLicenseKey)))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// FormatActivationRequest builds armored `.authforge-request` text from explicit fields.
+func FormatActivationRequest(appID, hwid, createdAt, machineName, osName, sdk, licenseKey string) string {
+	jsonBody := canonicalActivationRequestJSON(appID, hwid, createdAt, machineName, osName, sdk, licenseKey)
+	payloadB64 := base64.StdEncoding.EncodeToString([]byte(jsonBody))
+	sum := sha256.Sum256([]byte(payloadB64))
+	checksum := fmt.Sprintf("%x", sum)[:16]
+	clean := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(appID, "\r", " "), "\n", " "))
+	return strings.Join([]string{
+		beginActivationRequest,
+		fmt.Sprintf("Version: %d", activationRequestVersion),
+		"App-Id: " + clean,
+		"Checksum: " + checksum,
+		"",
+		wrapArmor64(payloadB64),
+		endActivationRequest,
+		"",
+	}, "\n")
+}
+
+// CreateActivationRequest builds an activation request for this machine.
+// No network, no session, no app secret. machineName is omitted unless
+// opts.IncludeMachineName is true.
+func (c *Client) CreateActivationRequest(opts ActivationRequestOptions) string {
+	createdAt := opts.CreatedAt
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format("2006-01-02T15:04:05.000") + "Z"
+	}
+	var machineName string
+	if opts.IncludeMachineName {
+		machineName = opts.MachineName
+		if machineName == "" {
+			machineName, _ = os.Hostname()
+		}
+	}
+	osName := ""
+	if !opts.OmitOS {
+		if opts.OS != "" {
+			osName = opts.OS
+		} else {
+			osName = detectOSLabel()
+		}
+	}
+	sdk := ""
+	if !opts.OmitSDK {
+		if opts.SDK != "" {
+			sdk = opts.SDK
+		} else {
+			sdk = activationRequestSDKTag
+		}
+	}
+	licenseKey := opts.LicenseKey
+	if licenseKey == "" {
+		c.mu.Lock()
+		licenseKey = c.licenseKey
+		c.mu.Unlock()
+	}
+	return FormatActivationRequest(c.appID, c.hwid, createdAt, machineName, osName, sdk, licenseKey)
 }

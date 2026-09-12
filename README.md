@@ -1,4 +1,4 @@
-﻿# AuthForge Go SDK
+# AuthForge Go SDK
 
 Official Go SDK for [AuthForge](https://authforge.cc). Activate a license online with an Ed25519-verified response, then run through the grace period by default (no further network calls), or opt in to online check-ins for fast revocation.
 
@@ -36,7 +36,7 @@ Everything in this list ships in `authforge.go`, `crypto.go`, `hwid.go`, and `of
 The module is **`github.com/AuthForgeCC/authforge-go`**. With a released version tag on GitHub, add it like any other public module:
 
 ```bash
-go get github.com/AuthForgeCC/authforge-go@v1.2.1
+go get github.com/AuthForgeCC/authforge-go@v1.3.0
 ```
 
 Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.2.1`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
@@ -175,8 +175,8 @@ if err != nil {
 	log.Fatal(err)
 }
 
-// 1. The customer sends you this value so you can bind the file to their machine:
-fmt.Println("HWID:", client.HWID())
+// 1. Write an activation request the operator drops into the mint dialog:
+request := client.CreateActivationRequest(authforge.ActivationRequestOptions{})
 
 // 2. Later, authorize from the minted file (path or armored text). No network.
 lic, err := client.LoginFromFile("license.authforge")
@@ -241,6 +241,7 @@ This means a session-style app running for 6 hours at a 15-minute check-in inter
 | `OfflineLicense()` | `*OfflineLicense` | The offline file in use (`JTI`, `ExpiresAt`, `HwidPolicy`, …) or `nil` |
 | `GetSessionKind()` | `SessionKind` | `SessionKindOnline`, `SessionKindOffline`, or `SessionKindNone` when logged out |
 | `HWID()` | `string` | The HWID this client sends (or `HWIDOverride`); customers share it to receive a bound file |
+| `CreateActivationRequest(opts ActivationRequestOptions)` | `string` | Unsigned `.authforge-request` for this machine. No network, no secret. Hostname omitted unless `IncludeMachineName` |
 | `Logout()` | `void` | Stops background checks and clears all session/auth state |
 | `IsAuthenticated()` | `bool` | True when an active authenticated session exists |
 | `GetSessionData()` / `SessionData()` | `map[string]interface{}` | Full decoded payload map |

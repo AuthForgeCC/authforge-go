@@ -373,3 +373,65 @@ func TestLoginFromFileReadsFromDiskAndVerifyIsSideEffectFree(t *testing.T) {
 		t.Fatal("expected read error for missing file")
 	}
 }
+
+func TestCreateActivationRequestMatchesVectors(t *testing.T) {
+	raw, err := os.ReadFile("activation_request_vectors.json")
+	if err != nil {
+		t.Fatalf("read activation request vectors: %v", err)
+	}
+	var vectors struct {
+		Cases []struct {
+			Name   string `json:"name"`
+			File   string `json:"file"`
+			Inputs *struct {
+				AppID       string `json:"appId"`
+				HWID        string `json:"hwid"`
+				CreatedAt   string `json:"createdAt"`
+				MachineName string `json:"machineName"`
+				OS          string `json:"os"`
+				SDK         string `json:"sdk"`
+				LicenseKey  string `json:"licenseKey"`
+			} `json:"inputs"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatalf("parse activation request vectors: %v", err)
+	}
+	dummyKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	for _, c := range vectors.Cases {
+		if c.Inputs == nil {
+			continue
+		}
+		c := c
+		t.Run(c.Name, func(t *testing.T) {
+			client, err := New(Config{
+				AppID:        c.Inputs.AppID,
+				PublicKey:   dummyKey,
+				HWIDOverride: c.Inputs.HWID,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			got := client.CreateActivationRequest(ActivationRequestOptions{
+				CreatedAt:          c.Inputs.CreatedAt,
+				OmitOS:             c.Inputs.OS == "",
+				OmitSDK:            c.Inputs.SDK == "",
+				IncludeMachineName: c.Inputs.MachineName != "",
+				MachineName:        c.Inputs.MachineName,
+				OS:                 c.Inputs.OS,
+				SDK:                c.Inputs.SDK,
+				LicenseKey:         c.Inputs.LicenseKey,
+			})
+			if got != c.File {
+				t.Fatalf("generated request did not match vector\n got: %q\nwant: %q", got, c.File)
+			}
+			formatted := FormatActivationRequest(
+				c.Inputs.AppID, c.Inputs.HWID, c.Inputs.CreatedAt,
+				c.Inputs.MachineName, c.Inputs.OS, c.Inputs.SDK, c.Inputs.LicenseKey,
+			)
+			if formatted != c.File {
+				t.Fatalf("FormatActivationRequest did not match vector")
+			}
+		})
+	}
+}
