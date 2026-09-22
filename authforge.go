@@ -10,10 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +44,118 @@ var (
 	// given: an offline session has no server session and never phones home.
 	ErrOfflineSession = errors.New("authforge: offline_session")
 )
+
+var serverErrorSentinels = map[string]error{
+	"invalid_app":             ErrInvalidApp,
+	"invalid_key":             ErrInvalidKey,
+	"expired":                 ErrExpired,
+	"revoked":                 ErrRevoked,
+	"hwid_mismatch":           ErrHwidMismatch,
+	"no_credits":              ErrNoCredits,
+	"app_burn_cap_reached":    ErrAppBurnCapReached,
+	"blocked":                 ErrBlocked,
+	"rate_limited":            ErrRateLimited,
+	"replay_detected":         ErrReplayDetected,
+	"app_disabled":            ErrAppDisabled,
+	"session_expired":         ErrSessionExpired,
+	"revoke_requires_session": ErrRevokeRequiresSession,
+	"bad_request":             ErrBadRequest,
+	"malformed_request":       ErrBadRequest,
+	"demo_quota_exceeded":     nil,
+	"server_error":            ErrServerError,
+	"system_error":            ErrServerError,
+}
+
+// Codes where AuthForge definitively rejected the session or license. Every
+// other code is transient: network_error, timeout, rate_limited,
+// system_error, server_error, no_credits, demo_quota_exceeded,
+// app_burn_cap_reached, bad_request, invalid_key, every http_error_<status>,
+// invalid_json_response, unexpected_response, SDK-local codes such as
+// nonce_mismatch, and codes this SDK version doesn't know yet.
+var definitiveErrorCodes = map[string]struct{}{
+	"revoked":            {},
+	"expired":            {},
+	"hwid_mismatch":      {},
+	"blocked":            {},
+	"session_expired":    {},
+	"malformed_request":  {},
+	"app_disabled":       {},
+	"invalid_app":        {},
+	"signature_mismatch": {},
+}
+
+// errSessionReplaced reports a check-in whose session was logged out or
+// replaced while the request was in flight; its result is discarded.
+var errSessionReplaced = errors.New("authforge: session replaced during check-in")
+
+var serverErrorCodeRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// Error is a failure with a machine-readable Code: the server's error code
+// ("revoked", "hwid_mismatch", ...) or an SDK code ("network_error",
+// "timeout", "http_error_502", "signature_mismatch", ...). errors.Is still
+// matches the sentinel errors (ErrRevoked, ErrHwidMismatch, ...) and the
+// underlying transport error.
+type Error struct {
+	Code     string
+	message  string
+	sentinel error
+	cause    error
+}
+
+func (e *Error) Error() string {
+	return e.message
+}
+
+func (e *Error) Unwrap() []error {
+	out := make([]error, 0, 2)
+	if e.sentinel != nil {
+		out = append(out, e.sentinel)
+	}
+	if e.cause != nil {
+		out = append(out, e.cause)
+	}
+	return out
+}
+
+// IsTransient reports whether retrying later can succeed: every code except
+// the definitive revoked, expired, hwid_mismatch, blocked, session_expired,
+// malformed_request, app_disabled, invalid_app and signature_mismatch.
+// Unknown codes are transient.
+func (e *Error) IsTransient() bool {
+	return isTransientCode(e.Code)
+}
+
+// IsFatal reports whether AuthForge definitively rejected the session or
+// license (revoked, expired, hwid_mismatch, blocked, session_expired,
+// malformed_request, app_disabled, invalid_app, signature_mismatch).
+func (e *Error) IsFatal() bool {
+	return !e.IsTransient()
+}
+
+// IsTransient reports whether err is an AuthForge failure worth retrying.
+func IsTransient(err error) bool {
+	var afErr *Error
+	return errors.As(err, &afErr) && afErr.IsTransient()
+}
+
+// ErrorCode returns the machine-readable code of an AuthForge failure, or ""
+// when err is not one.
+func ErrorCode(err error) string {
+	var afErr *Error
+	if errors.As(err, &afErr) {
+		return afErr.Code
+	}
+	return ""
+}
+
+func isTransientCode(code string) bool {
+	_, definitive := definitiveErrorCodes[code]
+	return !definitive
+}
+
+func newError(code string, message string) *Error {
+	return &Error{Code: code, message: message}
+}
 
 // SessionKind says how the client authenticated.
 type SessionKind int
@@ -98,8 +213,14 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	APIBaseURL        string
 	OnFailure         func(error string)
-	RequestTimeout    time.Duration
-	HWIDOverride      string
+	// OnHeartbeatFailure, when set, receives background check failures
+	// instead of OnFailure, as an *Error carrying the code and its
+	// transient/fatal classification. Fatal failures have already cleared
+	// the session when it runs; transient ones keep checking in. It runs on
+	// the background goroutine with no SDK lock held, so it may call Logout.
+	OnHeartbeatFailure func(err *Error)
+	RequestTimeout     time.Duration
+	HWIDOverride       string
 
 	// SessionTTL sets the grace period duration: how long the app keeps
 	// running on the signed session without contacting AuthForge. It is
@@ -123,13 +244,15 @@ type LoginResult struct {
 }
 
 type Client struct {
-	appID             string
-	appSecret         string
-	onlineHeartbeat   bool
-	heartbeatInterval time.Duration
-	apiBaseURL        string
-	onFailure         func(error string)
-	httpClient        *http.Client
+	appID              string
+	appSecret          string
+	onlineHeartbeat    bool
+	heartbeatInterval  time.Duration
+	apiBaseURL         string
+	onFailure          func(error string)
+	onHeartbeatFailure func(err *Error)
+	httpClient         *http.Client
+	sleep              func(time.Duration)
 	// sessionTTLSeconds is the SDK-requested session TTL sent to /auth/validate.
 	// Zero means "let the server pick its default".
 	sessionTTLSeconds int
@@ -153,10 +276,16 @@ type Client struct {
 	authenticated    bool
 	// offlineLicense is set when the client authenticated via LoginFromFile.
 	offlineLicense *OfflineLicense
+	// sessionGeneration changes on every Login and session reset, so a
+	// check-in that was in flight across one never writes its result back.
+	sessionGeneration uint64
 
 	heartbeatCtx    context.Context
 	heartbeatCancel context.CancelFunc
 	heartbeatWg     sync.WaitGroup
+	// inHeartbeatCallback lets Logout run from a failure callback, which
+	// executes on the goroutine Logout would otherwise wait for.
+	inHeartbeatCallback atomic.Bool
 }
 
 // collectPublicKeyStrings returns the canonical (de-duplicated, trimmed)
@@ -245,17 +374,19 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	client := &Client{
-		appID:             strings.TrimSpace(cfg.AppID),
-		appSecret:         strings.TrimSpace(cfg.AppSecret),
-		publicKeys:        publicKeys,
-		onlineHeartbeat:   onlineHeartbeat,
-		heartbeatInterval: interval,
-		apiBaseURL:        baseURL,
-		onFailure:         cfg.OnFailure,
-		sessionTTLSeconds: sessionTTLSeconds,
+		appID:              strings.TrimSpace(cfg.AppID),
+		appSecret:          strings.TrimSpace(cfg.AppSecret),
+		publicKeys:         publicKeys,
+		onlineHeartbeat:    onlineHeartbeat,
+		heartbeatInterval:  interval,
+		apiBaseURL:         baseURL,
+		onFailure:          cfg.OnFailure,
+		onHeartbeatFailure: cfg.OnHeartbeatFailure,
+		sessionTTLSeconds:  sessionTTLSeconds,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
+		sleep:            time.Sleep,
 		hwid:             resolvedHWID,
 		sessionData:      map[string]interface{}{},
 		appVariables:     map[string]interface{}{},
@@ -381,6 +512,20 @@ func (c *Client) SelfBan(
 
 func (c *Client) Logout() {
 	c.mu.Lock()
+	cancel := c.resetSessionLocked()
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		if !c.inHeartbeatCallback.Load() {
+			c.heartbeatWg.Wait()
+		}
+	}
+}
+
+// resetSessionLocked clears all session state and detaches the background
+// check loop, returning its cancel func. Callers hold c.mu.
+func (c *Client) resetSessionLocked() context.CancelFunc {
 	cancel := c.heartbeatCancel
 	c.heartbeatCancel = nil
 	c.heartbeatCtx = nil
@@ -396,12 +541,8 @@ func (c *Client) Logout() {
 	c.licenseVariables = map[string]interface{}{}
 	c.authenticated = false
 	c.offlineLicense = nil
-	c.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-		c.heartbeatWg.Wait()
-	}
+	c.sessionGeneration++
+	return cancel
 }
 
 // IsAuthenticated is true for an online session (Login) or an offline one
@@ -492,7 +633,7 @@ func (c *Client) validateOnce(licenseKey string, persistSession bool, invokeOnNe
 		return nil, err
 	}
 
-	return c.applySignedResponse(response, nonce, licenseKey, persistSession, true, "validate")
+	return c.applySignedResponse(response, nonce, licenseKey, persistSession, true, "validate", 0)
 }
 
 func (c *Client) startHeartbeat() {
@@ -523,16 +664,7 @@ func (c *Client) startHeartbeat() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				var err error
-				if onlineHeartbeat {
-					err = c.serverHeartbeat()
-				} else {
-					err = c.gracePeriodCheck()
-				}
-				if err != nil {
-					if c.onFailure != nil {
-						c.onFailure(err.Error())
-					}
+				if !c.heartbeatTick(ctx, onlineHeartbeat) {
 					return
 				}
 			}
@@ -540,13 +672,89 @@ func (c *Client) startHeartbeat() {
 	}()
 }
 
-func (c *Client) serverHeartbeat() error {
+// heartbeatTick runs one background check and reports whether checks should
+// continue. Transient failures keep the session and check in again next
+// interval. Definitive failures clear the session before the callback runs,
+// so neither the grace period nor IsAuthenticated keeps the app running on
+// it, and the callback may call Login again. Callbacks run with c.mu
+// released.
+func (c *Client) heartbeatTick(ctx context.Context, onlineHeartbeat bool) bool {
+	c.mu.Lock()
+	generation := c.sessionGeneration
+	c.mu.Unlock()
+
+	var err error
+	if onlineHeartbeat {
+		err = c.serverHeartbeat(generation)
+	} else {
+		err = c.gracePeriodCheck()
+	}
+	if err == nil {
+		return true
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+
+	c.mu.Lock()
+	if c.sessionGeneration != generation {
+		// The failure belongs to a session that has since been replaced.
+		c.mu.Unlock()
+		return ctx.Err() == nil
+	}
+	failure := c.heartbeatErrorLocked(err)
+	var cancel context.CancelFunc
+	if failure.IsFatal() {
+		cancel = c.resetSessionLocked()
+	}
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+
+	c.inHeartbeatCallback.Store(true)
+	if c.onHeartbeatFailure != nil {
+		c.onHeartbeatFailure(failure)
+	} else if c.onFailure != nil {
+		c.onFailure(failure.Error())
+	}
+	c.inHeartbeatCallback.Store(false)
+	return failure.IsTransient() && ctx.Err() == nil
+}
+
+// heartbeatErrorLocked normalizes a background check failure. Callers hold
+// c.mu.
+func (c *Client) heartbeatErrorLocked(err error) *Error {
+	var failure *Error
+	if !errors.As(err, &failure) {
+		switch {
+		case errors.Is(err, ErrSessionExpired):
+			failure = &Error{Code: "session_expired", message: err.Error(), sentinel: ErrSessionExpired}
+		case errors.Is(err, ErrSignatureMismatch):
+			failure = &Error{Code: "signature_mismatch", message: err.Error(), sentinel: ErrSignatureMismatch}
+		default:
+			failure = &Error{Code: "unknown_error", message: err.Error(), cause: err}
+		}
+	}
+	// A transient failure can't extend the session past its signed TTL.
+	if failure.IsTransient() && c.sessionExpiresIn > 0 && time.Now().Unix() >= c.sessionExpiresIn {
+		return &Error{
+			Code:     "session_expired",
+			message:  ErrSessionExpired.Error(),
+			sentinel: ErrSessionExpired,
+			cause:    failure,
+		}
+	}
+	return failure
+}
+
+func (c *Client) serverHeartbeat(generation uint64) error {
 	c.mu.Lock()
 	sessionToken := c.sessionToken
 	c.mu.Unlock()
 
 	if strings.TrimSpace(sessionToken) == "" {
-		return fmt.Errorf("authforge: missing session token")
+		return newError("missing_session_token", "authforge: missing session token")
 	}
 
 	nonce, err := generateNonce()
@@ -561,13 +769,49 @@ func (c *Client) serverHeartbeat() error {
 		"hwid":         c.hwid,
 	}
 
-	response, err := c.postJSON("/auth/heartbeat", body, true)
+	// Network failures surface once, through the heartbeat failure callback.
+	response, err := c.postJSON("/auth/heartbeat", body, false)
 	if err != nil {
 		return err
 	}
+	if err := checkHeartbeatVerdict(response); err != nil {
+		return err
+	}
 
-	_, err = c.applySignedResponse(response, nonce, "", true, false, "heartbeat")
+	_, err = c.applySignedResponse(response, nonce, "", true, false, "heartbeat", generation)
 	return err
+}
+
+// checkHeartbeatVerdict accepts a non-success check-in response as an
+// AuthForge verdict only when it is {"status":"failed","error":"<code>"};
+// anything else (proxy pages, partial bodies) is unexpected_response, which
+// is transient.
+func checkHeartbeatVerdict(response map[string]interface{}) error {
+	if isSuccessStatus(response["status"]) {
+		return nil
+	}
+	status, statusIsString := response["status"].(string)
+	code, codeIsString := response["error"].(string)
+	if statusIsString && strings.EqualFold(strings.TrimSpace(status), "failed") && codeIsString && strings.TrimSpace(code) != "" {
+		return nil
+	}
+	return newError("unexpected_response", fmt.Sprintf(
+		"authforge: unexpected_response: status=%s error=%s",
+		rawJSONField(response, "status"),
+		rawJSONField(response, "error"),
+	))
+}
+
+func rawJSONField(response map[string]interface{}, key string) string {
+	value, ok := response[key]
+	if !ok {
+		return "<missing>"
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%v", value)
+	}
+	return string(encoded)
 }
 
 // gracePeriodCheck enforces the grace period: it re-verifies the signed
@@ -581,7 +825,7 @@ func (c *Client) gracePeriodCheck() error {
 	c.mu.Unlock()
 
 	if payload == "" || signature == "" {
-		return fmt.Errorf("authforge: missing local verification state")
+		return newError("missing_session_state", "authforge: missing local verification state")
 	}
 
 	if !verifySignature(payload, signature, c.publicKeys) {
@@ -594,6 +838,9 @@ func (c *Client) gracePeriodCheck() error {
 	return ErrSessionExpired
 }
 
+// applySignedResponse verifies a signed response and, when persistSession is
+// set, stores it. A login starts a new session generation; a check-in stores
+// its result only while the session is still the one at generation.
 func (c *Client) applySignedResponse(
 	response map[string]interface{},
 	expectedNonce string,
@@ -601,11 +848,12 @@ func (c *Client) applySignedResponse(
 	persistSession bool,
 	isLogin bool,
 	signingContext string,
+	generation uint64,
 ) (*LoginResult, error) {
 	_ = signingContext
 	status := response["status"]
 	if !isSuccessStatus(status) {
-		serverError := valueAsString(response["error"])
+		serverError := extractServerError(response)
 		if serverError == "" {
 			serverError = "unknown_error"
 		}
@@ -614,22 +862,22 @@ func (c *Client) applySignedResponse(
 
 	payloadB64 := valueAsString(response["payload"])
 	if payloadB64 == "" {
-		return nil, fmt.Errorf("authforge: missing payload")
+		return nil, newError("missing_payload", "authforge: missing payload")
 	}
 
 	signature := valueAsString(response["signature"])
 	if signature == "" {
-		return nil, fmt.Errorf("authforge: missing signature")
+		return nil, newError("missing_signature", "authforge: missing signature")
 	}
 
 	payload, err := decodePayload(payloadB64)
 	if err != nil {
-		return nil, fmt.Errorf("authforge: invalid payload: %w", err)
+		return nil, &Error{Code: "invalid_payload", message: fmt.Sprintf("authforge: invalid payload: %v", err), cause: err}
 	}
 
 	nonce := valueAsString(payload["nonce"])
 	if nonce != expectedNonce {
-		return nil, fmt.Errorf("authforge: nonce mismatch")
+		return nil, newError("nonce_mismatch", "authforge: nonce mismatch")
 	}
 
 	if !verifySignature(payloadB64, signature, c.publicKeys) {
@@ -638,14 +886,14 @@ func (c *Client) applySignedResponse(
 
 	sessionToken := valueAsString(payload["sessionToken"])
 	if sessionToken == "" {
-		return nil, fmt.Errorf("authforge: missing session token")
+		return nil, newError("missing_session_token", "authforge: missing session token")
 	}
 
 	expiresIn, hasTokenExpiry := extractExpiresFromSessionToken(sessionToken)
 	if !hasTokenExpiry {
 		value, ok := numberToInt64(payload["expiresIn"])
 		if !ok {
-			return nil, fmt.Errorf("authforge: missing expiresIn")
+			return nil, newError("missing_expires_in", "authforge: missing expiresIn")
 		}
 		expiresIn = value
 	}
@@ -684,6 +932,12 @@ func (c *Client) applySignedResponse(
 	}
 
 	c.mu.Lock()
+	if isLogin {
+		c.sessionGeneration++
+	} else if c.sessionGeneration != generation {
+		c.mu.Unlock()
+		return nil, errSessionReplaced
+	}
 	if licenseKey != "" {
 		c.licenseKey = licenseKey
 	}
@@ -726,7 +980,7 @@ func (c *Client) postJSON(path string, body map[string]interface{}, invokeOnNetw
 
 	for attempt := 0; attempt < len(rateRetryDelays); attempt++ {
 		if rateRetryDelays[attempt] > 0 {
-			time.Sleep(rateRetryDelays[attempt])
+			c.sleep(rateRetryDelays[attempt])
 			if _, ok := mutableBody["nonce"]; ok {
 				nonce, nonceErr := generateNonce()
 				if nonceErr != nil {
@@ -757,7 +1011,7 @@ func (c *Client) postJSON(path string, body map[string]interface{}, invokeOnNetw
 			}
 			if !networkRetried {
 				networkRetried = true
-				time.Sleep(2 * time.Second)
+				c.sleep(2 * time.Second)
 				request, err = http.NewRequest(http.MethodPost, c.apiBaseURL+path, bytes.NewReader(requestBody))
 				if err != nil {
 					return nil, fmt.Errorf("authforge: create request failed: %w", err)
@@ -768,25 +1022,43 @@ func (c *Client) postJSON(path string, body map[string]interface{}, invokeOnNetw
 			if invokeOnNetworkFailure && c.onFailure != nil {
 				c.onFailure("network_error")
 			}
-			return nil, fmt.Errorf("authforge: request failed: %w", err)
+			return nil, &Error{
+				Code:    transportErrorCode(err),
+				message: fmt.Sprintf("authforge: request failed: %v", err),
+				cause:   err,
+			}
 		}
 
 		rawBody, err := io.ReadAll(response.Body)
 		response.Body.Close()
 		if err != nil {
-			return nil, fmt.Errorf("authforge: read response failed: %w", err)
+			return nil, &Error{
+				Code:    transportErrorCode(err),
+				message: fmt.Sprintf("authforge: read response failed: %v", err),
+				cause:   err,
+			}
 		}
 
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(rawBody, &parsed); err != nil {
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				return nil, fmt.Errorf("authforge: http error %d", response.StatusCode)
+				return nil, &Error{
+					Code:    fmt.Sprintf("http_error_%d", response.StatusCode),
+					message: fmt.Sprintf("authforge: http error %d", response.StatusCode),
+					cause:   err,
+				}
 			}
-			return nil, fmt.Errorf("authforge: invalid json response: %w", err)
+			return nil, &Error{
+				Code:    "invalid_json_response",
+				message: fmt.Sprintf("authforge: invalid json response: %v", err),
+				cause:   err,
+			}
 		}
 
+		// no_credits / app_burn_cap_reached / demo_quota_exceeded also use
+		// HTTP 429 but are not worth retrying; only retry a genuine rate limit.
 		serverError := extractServerError(parsed)
-		if response.StatusCode == 429 || serverError == "rate_limited" {
+		if serverError == "rate_limited" || (response.StatusCode == http.StatusTooManyRequests && serverError == "") {
 			lastRateErr = mapServerError("rate_limited")
 			continue
 		}
@@ -797,58 +1069,36 @@ func (c *Client) postJSON(path string, body map[string]interface{}, invokeOnNetw
 	if lastRateErr != nil {
 		return nil, lastRateErr
 	}
-	return nil, ErrRateLimited
+	return nil, mapServerError("rate_limited")
+}
+
+func transportErrorCode(err error) string {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return "timeout"
+	}
+	return "network_error"
 }
 
 func mapServerError(serverError string) error {
-	switch serverError {
-	case "invalid_app":
-		return fmt.Errorf("%w: %s", ErrInvalidApp, serverError)
-	case "invalid_key":
-		return fmt.Errorf("%w: %s", ErrInvalidKey, serverError)
-	case "expired":
-		return fmt.Errorf("%w: %s", ErrExpired, serverError)
-	case "revoked":
-		return fmt.Errorf("%w: %s", ErrRevoked, serverError)
-	case "hwid_mismatch":
-		return fmt.Errorf("%w: %s", ErrHwidMismatch, serverError)
-	case "no_credits":
-		return fmt.Errorf("%w: %s", ErrNoCredits, serverError)
-	case "app_burn_cap_reached":
-		return fmt.Errorf("%w: %s", ErrAppBurnCapReached, serverError)
-	case "blocked":
-		return fmt.Errorf("%w: %s", ErrBlocked, serverError)
-	case "rate_limited":
-		return fmt.Errorf("%w: %s", ErrRateLimited, serverError)
-	case "replay_detected":
-		return fmt.Errorf("%w: %s", ErrReplayDetected, serverError)
-	case "app_disabled":
-		return fmt.Errorf("%w: %s", ErrAppDisabled, serverError)
-	case "session_expired":
-		return fmt.Errorf("%w: %s", ErrSessionExpired, serverError)
-	case "revoke_requires_session":
-		return fmt.Errorf("%w: %s", ErrRevokeRequiresSession, serverError)
-	case "bad_request":
-		return fmt.Errorf("%w: %s", ErrBadRequest, serverError)
-	case "malformed_request":
-		return fmt.Errorf("%w: %s", ErrBadRequest, serverError)
-	case "server_error", "system_error":
-		return fmt.Errorf("%w: %s", ErrServerError, serverError)
-	default:
-		return fmt.Errorf("authforge: %s", serverError)
+	sentinel := serverErrorSentinels[serverError]
+	message := "authforge: " + serverError
+	if sentinel != nil {
+		message = sentinel.Error() + ": " + serverError
 	}
+	return &Error{Code: serverError, message: message, sentinel: sentinel}
 }
 
+// extractServerError returns the response's error code. Codes this SDK
+// version doesn't know yet pass through instead of being dropped.
 func extractServerError(response map[string]interface{}) string {
 	errorCode := strings.ToLower(valueAsString(response["error"]))
-	switch errorCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "malformed_request", "server_error", "system_error":
+	if _, known := serverErrorSentinels[errorCode]; known || serverErrorCodeRE.MatchString(errorCode) {
 		return errorCode
 	}
 
 	statusCode := strings.ToLower(valueAsString(response["status"]))
-	switch statusCode {
-	case "invalid_app", "invalid_key", "expired", "revoked", "hwid_mismatch", "no_credits", "app_burn_cap_reached", "blocked", "rate_limited", "replay_detected", "app_disabled", "session_expired", "revoke_requires_session", "bad_request", "malformed_request", "server_error", "system_error":
+	if _, known := serverErrorSentinels[statusCode]; known {
 		return statusCode
 	}
 	return ""

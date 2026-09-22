@@ -446,17 +446,17 @@ func readLicenseFileInput(pathOrText string) (string, error) {
 // ---------------------------------------------------------------------------
 
 const (
-	activationRequestVersion   = 1
-	activationRequestTyp       = "authforge-activation-request"
-	beginActivationRequest      = "-----BEGIN AUTHFORGE ACTIVATION REQUEST-----"
-	endActivationRequest        = "-----END AUTHFORGE ACTIVATION REQUEST-----"
-	activationRequestSDKTag    = "go/1.3.1"
-	armorLineWidth             = 64
-	maxRequestHWID             = 256
-	maxRequestMachineName      = 128
-	maxRequestOS                = 64
-	maxRequestSDK               = 64
-	maxRequestLicenseKey       = 64
+	activationRequestVersion = 1
+	activationRequestTyp     = "authforge-activation-request"
+	beginActivationRequest   = "-----BEGIN AUTHFORGE ACTIVATION REQUEST-----"
+	endActivationRequest     = "-----END AUTHFORGE ACTIVATION REQUEST-----"
+	activationRequestSDKTag  = "go/1.4.0"
+	armorLineWidth           = 64
+	maxRequestHWID           = 256
+	maxRequestMachineName    = 128
+	maxRequestOS             = 64
+	maxRequestSDK            = 64
+	maxRequestLicenseKey     = 64
 )
 
 // ActivationRequestOptions controls optional fields on CreateActivationRequest.

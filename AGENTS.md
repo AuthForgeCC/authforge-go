@@ -12,7 +12,7 @@ After activation there are two policies:
 - **Grace period (the default).** The app keeps running on the signed session without contacting AuthForge. The SDK re-verifies the signed session locally in the background and fails when the session TTL expires. The grace period equals the session TTL: default 24h, server clamps requested values to 1h to 7d (set with `SessionTTL`). No network traffic after activation.
 - **Online check-ins (opt-in, `OnlineHeartbeat: true`).** The SDK periodically calls `POST /auth/heartbeat` for fast revocation and concurrent-use detection. A revoked license fails on the very next check-in, and each successful check-in refreshes the session.
 
-When a background check fails (revocation on a check-in, or the grace period ending), `OnFailure` is invoked and you handle it (typically exit the app).
+When a background check fails (revocation on a check-in, or the grace period ending), `OnHeartbeatFailure` (or `OnFailure`) is invoked and you handle it (typically exit the app on a fatal failure).
 
 There is also a **separate** mode for machines that can never reach the internet: **offline license files (`.authforge`)**. The operator mints a signed file in the AuthForge cloud; `LoginFromFile` verifies it locally with the app public key and the machine HWID, with zero network calls. Do not ship the App Secret in those builds (leave `AppSecret` empty). Only use it when the user explicitly asks for air-gapped / offline-file licensing. The default integration is always online `Login` + grace period. To collect the HWID for a bound file, write an **activation request** (`.authforge-request`) with `CreateActivationRequest`. It is not a license, is not signed, and does not mint anything. Prefer it over printing the raw HWID.
 
@@ -26,7 +26,7 @@ There is also a **separate** mode for machines that can never reach the internet
 
 ## Installation
 
-Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.3.1`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
+Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.4.0`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
 
 ## Minimal working integration
 
@@ -94,7 +94,8 @@ func main() {
 | `HeartbeatMode` | `string` | no | `""` | Deprecated (see migration section). Empty is valid and means the default grace period behavior; `"server"` maps to `OnlineHeartbeat: true`; `"local"` maps to the default. Case-insensitive |
 | `HeartbeatInterval` | `time.Duration` | no | `15m` | Interval between background checks (minimum `10s`) |
 | `APIBaseURL` | `string` | no | `https://auth.authforge.cc` | API base URL |
-| `OnFailure` | `func(error string)` | no | `nil` | Background check failures; `Login` network failures after retry. Not invoked by `ValidateLicense` |
+| `OnFailure` | `func(error string)` | no | `nil` | Background check failures (unless `OnHeartbeatFailure` is set); `Login` network failures after retry. Not invoked by `ValidateLicense` |
+| `OnHeartbeatFailure` | `func(err *authforge.Error)` | no | `nil` | Background check failures as a typed error: `err.Code`, `err.IsTransient()`, `err.IsFatal()`. Takes precedence over `OnFailure` for background checks. Prefer it in new code |
 | `RequestTimeout` | `time.Duration` | no | `15s` | Per-request HTTP timeout |
 | `SessionTTL` | `time.Duration` | no | `0` (server default: 24h) | The grace period duration: requested session token lifetime. Server clamps to `[1h, 7d]`; out-of-range values are silently clamped. Online check-ins refresh the token while preserving this lifetime. |
 | `HWIDOverride` | `string` | no | `""` | Optional custom HWID/subject string. When non-empty (for example `tg:123456789`), the SDK sends it instead of generating a machine fingerprint. |
@@ -131,13 +132,21 @@ For Telegram/Discord bot flows, prefer immutable IDs (`tg:<user_id>`, `discord:<
 
 ## Error codes the server can return
 
-Full set: invalid_app, invalid_key, expired, revoked, hwid_mismatch, no_credits, app_burn_cap_reached, blocked, rate_limited, replay_detected, app_disabled, session_expired, revoke_requires_session, bad_request, malformed_request, system_error
+Full set: invalid_app, invalid_key, expired, revoked, hwid_mismatch, no_credits, app_burn_cap_reached, blocked, rate_limited, replay_detected, app_disabled, session_expired, revoke_requires_session, bad_request, malformed_request, demo_quota_exceeded, system_error. Unrecognized codes are passed through verbatim.
 
-These map to the exported sentinel errors (`ErrInvalidApp`, `ErrInvalidKey`, `ErrAppBurnCapReached`, `ErrRevokeRequiresSession`, `ErrServerError`, and so on); use `errors.Is` to match them. `bad_request`/`malformed_request` both map to `ErrBadRequest`, and `system_error`/`server_error` both map to `ErrServerError`.
+Errors are `*authforge.Error` values: `authforge.ErrorCode(err)` gives the code and `authforge.IsTransient(err)` the classification. They also match the exported sentinel errors (`ErrInvalidApp`, `ErrInvalidKey`, `ErrAppBurnCapReached`, `ErrRevokeRequiresSession`, `ErrServerError`, and so on) with `errors.Is`. `bad_request`/`malformed_request` both map to `ErrBadRequest`, and `system_error`/`server_error` both map to `ErrServerError`.
 
 Notes:
 - `replay_detected` is validate-only. `rate_limited` can be returned by `/auth/validate` and `/auth/heartbeat` (heartbeat is license-limited at 6/min and has no app-layer IP limit).
-- When the grace period ends, the background check reports `ErrSessionExpired` through `OnFailure`.
+- `/auth/heartbeat` returns `hwid_mismatch` when the HWID is no longer bound to the license (for example after an HWID reset) and `blocked` when the HWID/IP is blacklisted or not whitelisted.
+- When the grace period ends, the background check reports `session_expired` (`ErrSessionExpired`).
+
+Heartbeat failure classification (`err.IsTransient()` / `authforge.IsTransient(err)`):
+- **Fatal** (definitive allowlist): `revoked`, `expired`, `hwid_mismatch`, `blocked`, `session_expired`, `malformed_request`, `app_disabled`, `invalid_app`, and the SDK-local `signature_mismatch`. The SDK clears the stored session and stops background checks before the callback runs; `IsAuthenticated()` is `false`.
+- **Transient**: everything else, including `network_error`, `timeout`, `rate_limited`, `system_error`, `no_credits`, `demo_quota_exceeded`, `app_burn_cap_reached`, `bad_request`, `invalid_key`, every `http_error_<status>`, `invalid_json_response`, `unexpected_response` and unknown codes. The session is kept and the SDK checks in again next interval; after the session TTL passes, the next transient failure becomes a fatal `session_expired`.
+- A failed check-in is an AuthForge verdict only when the body is a JSON object with `"status": "failed"` and a non-empty string `error`; any other failure body is `unexpected_response` (transient), with the raw `status` / `error` in the message.
+- `rate_limited` (or a 429 without an error code) is retried inside the request after 2s and 5s. `no_credits`, `demo_quota_exceeded` and `app_burn_cap_reached` are not retried immediately; the next check-in happens at the next interval.
+- Callbacks run on the background check goroutine with no SDK lock held: calling `Logout()` or `IsAuthenticated()` from them is safe. A check-in in flight across `Logout()` / `Login` never writes its result back.
 
 ## Common patterns
 
@@ -180,13 +189,24 @@ Offline file error sentinels (in check order): `ErrOfflineBadArmor`, `ErrOffline
 
 ### Custom error handling
 
-Use `errors.Is` with `authforge.ErrInvalidKey`, `authforge.ErrExpired`, etc. on `Login` errors. `OnFailure` receives background check error strings (and `network_error` on some transport failures).
+Use `errors.Is` with `authforge.ErrInvalidKey`, `authforge.ErrExpired`, etc. (or `authforge.ErrorCode(err)`) on `Login` errors. For background checks, use `OnHeartbeatFailure` to tolerate outages but stop on a definitive answer. `OnFailure` receives the error message string instead (and `network_error` on `Login` transport failures).
+
+```go
+OnHeartbeatFailure: func(err *authforge.Error) {
+	if err.IsTransient() {
+		return // network / rate_limited / system_error / no_credits / unknown: SDK retries next interval
+	}
+	log.Printf("license check failed: %s", err.Code) // session already cleared
+	os.Exit(1)
+},
+```
 
 ## Do NOT
 
 - Do not hardcode the app secret as a plain string literal in source: use environment variables or encrypted config
 - Do not embed the App Secret in air-gapped / `LoginFromFile` builds: leave `AppSecret` empty; verification only needs app id + public key
-- Do not skip `OnFailure`: it is invoked when a background check fails (revocation on an online check-in, or the grace period ending)
+- Do not skip `OnFailure` / `OnHeartbeatFailure`: one of them is invoked when a background check fails (revocation on an online check-in, or the grace period ending)
+- Do not treat every background failure as a network blip or every one as fatal: check `err.IsTransient()`. Fatal failures have already cleared the session, so do not keep the app running on it
 - Do not call `Login` on every app action: call once at startup; the grace period or online check-ins handle the rest
 - Do not set the deprecated `HeartbeatMode` in new code: leave it empty for the default grace period, or set `OnlineHeartbeat: true` for online check-ins
 - Do not treat the grace period as persistent offline licensing: it is session continuation after one successful online activation, and revocations are only picked up at the next online validate or check-in

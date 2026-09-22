@@ -421,7 +421,7 @@ func TestCreateActivationRequestMatchesVectors(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			client, err := New(Config{
 				AppID:        c.Inputs.AppID,
-				PublicKey:   dummyKey,
+				PublicKey:    dummyKey,
 				HWIDOverride: c.Inputs.HWID,
 			})
 			if err != nil {
