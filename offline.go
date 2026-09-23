@@ -450,7 +450,7 @@ const (
 	activationRequestTyp     = "authforge-activation-request"
 	beginActivationRequest   = "-----BEGIN AUTHFORGE ACTIVATION REQUEST-----"
 	endActivationRequest     = "-----END AUTHFORGE ACTIVATION REQUEST-----"
-	activationRequestSDKTag  = "go/1.4.0"
+	activationRequestSDKTag  = "go/1.4.1"
 	armorLineWidth           = 64
 	maxRequestHWID           = 256
 	maxRequestMachineName    = 128

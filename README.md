@@ -36,10 +36,10 @@ Everything in this list ships in `authforge.go`, `crypto.go`, `hwid.go`, and `of
 The module is **`github.com/AuthForgeCC/authforge-go`**. With a released version tag on GitHub, add it like any other public module:
 
 ```bash
-go get github.com/AuthForgeCC/authforge-go@v1.4.0
+go get github.com/AuthForgeCC/authforge-go@v1.4.1
 ```
 
-Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.4.0`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
+Pin a **`v1.x.y` tag you have pushed** (for example **`@v1.4.1`**). Without an `@` suffix, `go get` resolves **`@latest`** once the proxy has indexed the tag.
 
 ### Local module with `replace` (forks, air-gapped builds, or hacking on the SDK)
 
@@ -77,13 +77,19 @@ import (
 )
 
 func main() {
+	licenseLost := make(chan *authforge.Error, 1)
 	client, err := authforge.New(authforge.Config{
 		AppID:     "YOUR_APP_ID",
 		AppSecret: "YOUR_APP_SECRET",
 		PublicKey: "YOUR_PUBLIC_KEY",
-		OnFailure: func(errMsg string) {
-			fmt.Fprintf(os.Stderr, "Auth failed: %s\n", errMsg)
-			os.Exit(1)
+		OnHeartbeatFailure: func(err *authforge.Error) {
+			if err.IsTransient() {
+				return // network blip: the SDK checks in again next interval
+			}
+			select {
+			case licenseLost <- err: // signal main instead of exiting on this goroutine
+			default:
+			}
 		},
 	})
 	if err != nil {
@@ -97,7 +103,10 @@ func main() {
 	}
 
 	fmt.Printf("Authenticated! Expires: %d\n", result.ExpiresIn)
-	select {}
+	lost := <-licenseLost // your app's work runs elsewhere until this fires
+	fmt.Fprintf(os.Stderr, "License check failed: %s\n", lost.Code)
+	// Save the user's work here, then exit.
+	os.Exit(1)
 }
 ```
 
@@ -317,13 +326,15 @@ A failed check-in counts as an AuthForge verdict only when the body is a JSON ob
 | Fatal | `revoked`, `expired`, `hwid_mismatch` (the HWID is no longer bound to the license, for example after an HWID reset), `blocked` (HWID/IP blacklisted or not whitelisted), `session_expired` (including the end of the grace period), `malformed_request`, `app_disabled`, `invalid_app`, `signature_mismatch` | Clears the stored session (as `Logout()` does) and stops background checks **before** the callback runs, so the grace period cannot keep the app running on it and `IsAuthenticated()` is `false`. The callback may call `Login` again. |
 | Transient | Everything else: `network_error`, `timeout`, `rate_limited`, `system_error`, `server_error`, `no_credits`, `demo_quota_exceeded`, `app_burn_cap_reached`, `bad_request`, `invalid_key`, every `http_error_<status>`, `invalid_json_response`, `unexpected_response`, and codes this SDK version doesn't know yet | Keeps the session and checks in again on the next `HeartbeatInterval`. Once the signed session's TTL has passed, the next transient failure is reported as a fatal `session_expired` instead. |
 
-The error reaches `OnHeartbeatFailure` when it is set, otherwise `OnFailure` as `err.Error()` (the same message as earlier releases, for example `authforge: license revoked: revoked`). A heartbeat network failure is reported once, not as a separate `network_error` string first.
+The error reaches `OnHeartbeatFailure` when it is set, otherwise `OnFailure` as `err.Error()` (the same message as earlier releases, for example `authforge: license revoked: revoked`). A heartbeat network failure is reported once, not as a separate `network_error` string first. Without a callback, a transient failure prints `AuthForge: background check failed (<code>); retrying next interval` to stderr and checks in again next interval; a fatal one clears the session and stops background checks without output (the SDK never exits the process, so check `IsAuthenticated()` or set a callback).
 
 Callbacks run on the background check goroutine with no SDK lock held, so calling `Logout()`, `IsAuthenticated()` or any other client method from them is safe; `Logout()` there stops further checks. A check-in still in flight when `Logout()` or `Login` runs never writes its result back to the client.
 
-To tolerate short outages but exit on a definitive answer:
+To tolerate short outages but shut down on a definitive answer, have the callback signal your main goroutine and let it save and exit:
 
 ```go
+licenseLost := make(chan *authforge.Error, 1)
+
 client, err := authforge.New(authforge.Config{
 	AppID:           "YOUR_APP_ID",
 	AppSecret:       "YOUR_APP_SECRET",
@@ -339,10 +350,25 @@ client, err := authforge.New(authforge.Config{
 			return
 		}
 		log.Printf("License check failed: %s", err.Code) // session already cleared
-		os.Exit(1)
+		select {
+		case licenseLost <- err: // runs on the background goroutine: signal, don't exit here
+		default:
+		}
 	},
 })
+
+// ... Login, then run your app's work on other goroutines ...
+
+select {
+case <-licenseLost:
+	saveUserWork()
+	client.Logout()
+	os.Exit(1)
+case <-appDone:
+}
 ```
+
+You can also pass a `context.Context` built with `context.WithCancelCause` and cancel it from the callback. Calling `os.Exit(1)` inside the callback is a last resort: deferred functions do not run, so save the user's work first.
 
 ## Self-ban (tamper response)
 

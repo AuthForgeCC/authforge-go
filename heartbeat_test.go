@@ -1,6 +1,7 @@
 package authforge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -527,6 +528,62 @@ func TestHeartbeatLegacyOnFailureGetsMessageOnce(t *testing.T) {
 		t.Fatalf("messages = %q", messages)
 	}
 	h.assertInvalidated(t)
+}
+
+// newCallbacklessHarness is a heartbeat harness with neither callback set,
+// writing its stderr warnings to the returned buffer.
+func newCallbacklessHarness(t *testing.T, baseURL string) (*heartbeatHarness, *bytes.Buffer) {
+	t.Helper()
+	h := newHeartbeatHarness(t, baseURL)
+	h.client.onHeartbeatFailure = nil
+	h.client.onFailure = nil
+	stderr := &bytes.Buffer{}
+	h.client.stderr = stderr
+	return h, stderr
+}
+
+func TestHeartbeatWithoutCallbackTransientFailureWarnsAndContinues(t *testing.T) {
+	srv, _ := heartbeatServer(t, heartbeatReply{503, failedBody("system_error")})
+	h, stderr := newCallbacklessHarness(t, srv.URL)
+
+	if !h.client.heartbeatTick(h.ctx, true) {
+		t.Fatal("expected checks to continue after a transient failure")
+	}
+	want := "AuthForge: background check failed (system_error); retrying next interval\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	h.assertStillAuthenticated(t)
+}
+
+// Go never exits the process: a definitive failure with no callback clears
+// the session and stops check-ins silently, as before.
+func TestHeartbeatWithoutCallbackDefinitiveFailureEndsSession(t *testing.T) {
+	cases := []struct {
+		name      string
+		reply     heartbeatReply
+		expiresIn time.Duration
+	}{
+		{"revoked", heartbeatReply{410, failedBody("revoked")}, time.Hour},
+		{"ttl_promoted_session_expired", heartbeatReply{503, failedBody("system_error")}, -time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := heartbeatServer(t, tc.reply)
+			h, stderr := newCallbacklessHarness(t, srv.URL)
+			h.client.mu.Lock()
+			h.client.sessionExpiresIn = time.Now().Add(tc.expiresIn).Unix()
+			h.client.mu.Unlock()
+
+			if h.client.heartbeatTick(h.ctx, true) {
+				t.Fatal("expected checks to stop after a definitive failure")
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want nothing", stderr.String())
+			}
+			h.assertInvalidated(t)
+		})
+	}
 }
 
 // End to end through the background goroutine: transient failures (including

@@ -218,6 +218,8 @@ type Config struct {
 	// transient/fatal classification. Fatal failures have already cleared
 	// the session when it runs; transient ones keep checking in. It runs on
 	// the background goroutine with no SDK lock held, so it may call Logout.
+	// With neither callback set, a transient failure prints a one-line
+	// warning to stderr and a fatal one clears the session silently.
 	OnHeartbeatFailure func(err *Error)
 	RequestTimeout     time.Duration
 	HWIDOverride       string
@@ -253,6 +255,7 @@ type Client struct {
 	onHeartbeatFailure func(err *Error)
 	httpClient         *http.Client
 	sleep              func(time.Duration)
+	stderr             io.Writer
 	// sessionTTLSeconds is the SDK-requested session TTL sent to /auth/validate.
 	// Zero means "let the server pick its default".
 	sessionTTLSeconds int
@@ -387,6 +390,7 @@ func New(cfg Config) (*Client, error) {
 			Timeout: timeout,
 		},
 		sleep:            time.Sleep,
+		stderr:           os.Stderr,
 		hwid:             resolvedHWID,
 		sessionData:      map[string]interface{}{},
 		appVariables:     map[string]interface{}{},
@@ -674,7 +678,8 @@ func (c *Client) startHeartbeat() {
 
 // heartbeatTick runs one background check and reports whether checks should
 // continue. Transient failures keep the session and check in again next
-// interval. Definitive failures clear the session before the callback runs,
+// interval; with no callback set they print a one-line warning to stderr.
+// Definitive failures clear the session before the callback runs,
 // so neither the grace period nor IsAuthenticated keeps the app running on
 // it, and the callback may call Login again. Callbacks run with c.mu
 // released.
@@ -717,6 +722,8 @@ func (c *Client) heartbeatTick(ctx context.Context, onlineHeartbeat bool) bool {
 		c.onHeartbeatFailure(failure)
 	} else if c.onFailure != nil {
 		c.onFailure(failure.Error())
+	} else if failure.IsTransient() {
+		fmt.Fprintf(c.stderr, "AuthForge: background check failed (%s); retrying next interval\n", failure.Code)
 	}
 	c.inHeartbeatCallback.Store(false)
 	return failure.IsTransient() && ctx.Err() == nil

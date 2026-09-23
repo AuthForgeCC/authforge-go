@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.1
+
+### Fixes
+
+- **Transient failures are no longer silent without a callback.** With neither `OnHeartbeatFailure` nor `OnFailure` set, a transient background check failure now writes one line to stderr, `AuthForge: background check failed (<code>); retrying next interval`, and checks in again on the next interval as before. Definitive failures still clear the session and stop background checks without output; the Go SDK still never calls `os.Exit`.
+
+### Docs
+
+- The README and `AGENTS.md` examples no longer call `os.Exit(1)` from the failure callback. The callback sends on a channel that the main goroutine selects on, so it can save work and exit; `os.Exit` from the callback is kept as a last resort after saving.
+
 ## 1.4.0
 
 ### Behavior changes for callers

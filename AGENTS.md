@@ -26,7 +26,7 @@ There is also a **separate** mode for machines that can never reach the internet
 
 ## Installation
 
-Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.4.0`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
+Use **`go get github.com/AuthForgeCC/authforge-go@<tag>`** with a published semver tag (for example `@v1.4.1`). For a local checkout or vendored sources, use a `replace` directive or copy the `.go` files as described in the repository README.
 
 ## Minimal working integration
 
@@ -45,13 +45,21 @@ import (
 )
 
 func main() {
+	// Receives the failure that ended the license; main saves work, then exits.
+	licenseLost := make(chan *authforge.Error, 1)
 	client, err := authforge.New(authforge.Config{
 		AppID:     "YOUR_APP_ID",
 		AppSecret: "YOUR_APP_SECRET",
 		PublicKey: "YOUR_PUBLIC_KEY", // required: base64 Ed25519 key from the dashboard
-		OnFailure: func(msg string) {
-			fmt.Fprintf(os.Stderr, "AuthForge: %s\n", msg)
-			os.Exit(1)
+		OnHeartbeatFailure: func(err *authforge.Error) {
+			if err.IsTransient() {
+				return // network blip / rate_limited: the SDK checks in again next interval
+			}
+			fmt.Fprintf(os.Stderr, "AuthForge: %s\n", err.Code)
+			select {
+			case licenseLost <- err: // runs on the background goroutine: signal, do not os.Exit here
+			default:
+			}
 		},
 	})
 	if err != nil {
@@ -76,9 +84,17 @@ func main() {
 
 	// --- Your application code starts here ---
 	fmt.Println("Running with a valid license.")
+	appDone := make(chan struct{}) // close this when your app's work finishes
 	// --- Your application code ends here ---
 
-	client.Logout()
+	select {
+	case <-licenseLost:
+		// Save the user's work here, then stop.
+		client.Logout()
+		os.Exit(1)
+	case <-appDone:
+		client.Logout()
+	}
 }
 ```
 
@@ -197,15 +213,21 @@ OnHeartbeatFailure: func(err *authforge.Error) {
 		return // network / rate_limited / system_error / no_credits / unknown: SDK retries next interval
 	}
 	log.Printf("license check failed: %s", err.Code) // session already cleared
-	os.Exit(1)
+	select {
+	case licenseLost <- err: // buffered chan the main goroutine selects on before saving and exiting
+	default:
+	}
 },
 ```
+
+`os.Exit(1)` inside the callback is a last resort: deferred functions do not run, so save the user's work first.
 
 ## Do NOT
 
 - Do not hardcode the app secret as a plain string literal in source: use environment variables or encrypted config
 - Do not embed the App Secret in air-gapped / `LoginFromFile` builds: leave `AppSecret` empty; verification only needs app id + public key
-- Do not skip `OnFailure` / `OnHeartbeatFailure`: one of them is invoked when a background check fails (revocation on an online check-in, or the grace period ending)
+- Do not skip `OnFailure` / `OnHeartbeatFailure`: one of them is invoked when a background check fails (revocation on an online check-in, or the grace period ending). Without either, transient failures only print a stderr warning and fatal ones clear the session silently; the SDK never exits the process for you
+- Do not call `os.Exit` from the callback as the normal shutdown path: send on a buffered channel (or cancel a context) so the main goroutine can save work and exit
 - Do not treat every background failure as a network blip or every one as fatal: check `err.IsTransient()`. Fatal failures have already cleared the session, so do not keep the app running on it
 - Do not call `Login` on every app action: call once at startup; the grace period or online check-ins handle the rest
 - Do not set the deprecated `HeartbeatMode` in new code: leave it empty for the default grace period, or set `OnlineHeartbeat: true` for online check-ins
